@@ -1,113 +1,178 @@
 import { useState, useEffect } from 'react';
-import Parameters from './components/Parameters';
 import SpeedChart from './components/SpeedChart';
+import Controls from './components/Controls';
 import Results from './components/Results';
-import { generateOptimalCurve, smoothCurve } from './utils/curves';
-import { calibrateDragCoefficient } from './utils/physics';
+import BoatVisualization from './components/BoatVisualization';
+import { normalizeCurve, smoothCurve } from './utils/curves';
+import { deriveSimpleLandmarks } from './utils/landmarks';
+import { calculateEnergy, calculateAveragePower, estimateFinishTime } from './utils/physics';
+import referenceCurveData from './data/referenceCurve.json';
 import './App.css';
 
 function App() {
-  const [params, setParams] = useState({
-    strokeRate: 30, // strokes per minute
-    raceDistance: 2000, // meters
-    targetTime: 7, // minutes
+  // Load reference curve (Curve A)
+  const [curveA] = useState({
+    times: referenceCurveData.times,
+    speeds: referenceCurveData.speeds,
   });
 
-  const [optimalCurve, setOptimalCurve] = useState([]);
-  const [userCurve, setUserCurve] = useState([]);
+  // Derive landmarks from Curve A
+  const [landmarks] = useState(
+    deriveSimpleLandmarks(referenceCurveData.times, referenceCurveData.speeds)
+  );
 
-  const numPoints = 100;
+  // Initialize Curve B as a copy of Curve A
+  const [curveB, setCurveB] = useState({
+    times: [...referenceCurveData.times],
+    speeds: [...referenceCurveData.speeds],
+  });
 
-  // Recalculate curves when parameters change
+  // Store Curve B's stroke duration separately (can be different from Curve A)
+  const [curveBStrokeDuration, setCurveBStrokeDuration] = useState(
+    referenceCurveData.times[referenceCurveData.times.length - 1]
+  );
+
+  // Normalized version of Curve B (matched to Curve A's average)
+  const [curveBNormalized, setCurveBNormalized] = useState({
+    times: [...referenceCurveData.times],
+    speeds: [...referenceCurveData.speeds],
+  });
+
+
+  // Race parameters - calculate finish time from Curve A's average velocity
+  const avgVelocityA = referenceCurveData.metadata.avgSpeed;
+  const raceDistance = 2000; // meters
+  const calculatedFinishTime = raceDistance / avgVelocityA; // seconds
+
+  const raceParams = {
+    raceDistance: raceDistance,
+    raceTime: calculatedFinishTime,
+  };
+
+  // Auto-normalize Curve B whenever it changes
   useEffect(() => {
-    const strokeTime = 60 / params.strokeRate; // seconds
-    const avgVelocity = params.raceDistance / (params.targetTime * 60); // m/s
+    const avgA = curveA.speeds.reduce((a, b) => a + b, 0) / curveA.speeds.length;
+    const normalizedSpeeds = normalizeCurve(curveB.speeds, avgA);
 
-    // Calibrate physics model
-    calibrateDragCoefficient(avgVelocity);
+    setCurveBNormalized({
+      times: curveB.times,
+      speeds: normalizedSpeeds,
+    });
+  }, [curveB, curveA]);
 
-    // Generate new optimal curve
-    const newOptimalCurve = generateOptimalCurve(avgVelocity, strokeTime, numPoints);
-    setOptimalCurve(newOptimalCurve);
+  const handleCurveBChange = (newSpeeds) => {
+    // Enforce periodic boundary: end value must match start value
+    const correctedSpeeds = [...newSpeeds];
+    correctedSpeeds[correctedSpeeds.length - 1] = correctedSpeeds[0];
 
-    // Reset user curve to optimal
-    setUserCurve([...newOptimalCurve]);
-  }, [params]);
-
-  const handleParamsChange = (newParams) => {
-    setParams(newParams);
+    setCurveB({
+      times: curveB.times,
+      speeds: correctedSpeeds,
+    });
   };
 
-  const handleUserCurveChange = (newCurve) => {
-    // Apply smoothing to prevent jagged curves
-    const smoothed = smoothCurve(newCurve, 5);
-    setUserCurve(smoothed);
+  const handleReset = () => {
+    // Reset Curve B to match Curve A
+    setCurveB({
+      times: [...curveA.times],
+      speeds: [...curveA.speeds],
+    });
   };
 
-  const handleResetCurve = () => {
-    setUserCurve([...optimalCurve]);
+  const handleSmooth = () => {
+    // Apply smoothing to Curve B
+    const smoothed = smoothCurve(curveB.speeds, 5);
+
+    // Enforce periodic boundary: end value must match start value
+    smoothed[smoothed.length - 1] = smoothed[0];
+
+    setCurveB({
+      times: curveB.times,
+      speeds: smoothed,
+    });
   };
 
-  const strokeTime = 60 / params.strokeRate;
-  const avgVelocity = params.raceDistance / (params.targetTime * 60);
+  const handleStrokeDurationChange = (newDuration) => {
+    // Update stroke duration and rescale time axis
+    setCurveBStrokeDuration(newDuration);
+
+    // Rescale the time points
+    const numPoints = curveB.times.length;
+    const newTimes = Array.from({ length: numPoints }, (_, i) =>
+      (i / (numPoints - 1)) * newDuration
+    );
+
+    setCurveB({
+      times: newTimes,
+      speeds: curveB.speeds, // Keep same speed values, just stretched/compressed over time
+    });
+  };
 
   return (
     <div className="app">
       <header className="app-header">
-        <h1>Rowing Speed Curve Analysis</h1>
+        <h1>Dynamic Energy-Equivalence Modeling for Rowing</h1>
         <p className="subtitle">
-          Explore how hull speed variation affects energy expenditure during rowing.
-          Due to the cubic relationship between power and velocity (P = k·v³),
-          varying speed requires more energy than maintaining constant velocity.
+          Analyze how intra-stroke velocity variation affects metabolic cost and race performance.
+          Due to the cubic power-velocity relationship (P ∝ v³), identical average speeds can
+          result in vastly different energy expenditures.
         </p>
       </header>
 
       <div className="app-content">
         <div className="sidebar">
-          <Parameters params={params} onParamsChange={handleParamsChange} />
-
-          <div className="controls">
-            <button className="reset-button" onClick={handleResetCurve}>
-              Reset to Optimal Curve
-            </button>
-          </div>
-
-          <div className="info-box">
-            <h3>How to Use</h3>
-            <ol>
-              <li>Adjust race parameters above</li>
-              <li>Click and drag on the chart to modify the speed curve</li>
-              <li>Observe energy differences below</li>
-            </ol>
-            <p className="note">
-              <strong>Note:</strong> The optimal curve (teal) represents minimal
-              speed variation. Try drawing curves with greater variation to see
-              the energy penalty!
-            </p>
-          </div>
+          <Controls
+            curveA={curveA}
+            curveB={curveB}
+            curveBNormalized={curveBNormalized}
+            onReset={handleReset}
+            onSmooth={handleSmooth}
+          />
         </div>
 
         <div className="main-content">
           <SpeedChart
-            optimalCurve={optimalCurve}
-            userCurve={userCurve}
-            onUserCurveChange={handleUserCurveChange}
-            strokeTime={strokeTime}
-            avgVelocity={avgVelocity}
+            curveA={curveA}
+            curveB={curveB}
+            onCurveBChange={handleCurveBChange}
+            onStrokeDurationChange={handleStrokeDurationChange}
+            landmarks={landmarks}
           />
 
-          <Results
-            optimalCurve={optimalCurve}
-            userCurve={userCurve}
-            params={params}
-          />
+          {(() => {
+            // Calculate time difference for boat visualization
+            const { times: timesA, speeds: speedsA } = curveA;
+            const { speeds: speedsBNorm } = curveBNormalized;
+            const avgPowerA = calculateAveragePower(timesA, speedsA);
+            const avgPowerBNorm = calculateAveragePower(timesA, speedsBNorm);
+            const estimate = estimateFinishTime(raceParams.raceTime, avgPowerA, avgPowerBNorm);
+
+            return (
+              <>
+                <BoatVisualization
+                  timeDifference={estimate.timeDifference}
+                  avgVelocityA={avgVelocityA}
+                />
+
+                <Results
+                  curveA={curveA}
+                  curveB={curveB}
+                  curveBNormalized={curveBNormalized}
+                  raceParams={raceParams}
+                />
+              </>
+            );
+          })()}
         </div>
       </div>
 
       <footer className="app-footer">
         <p>
-          Physics Principle: Energy = ∫ P dt = ∫ (k·v³) dt.
-          Minimizing speed variation minimizes energy for a given average velocity.
+          <strong>Reference:</strong> Curve A represents measured data from Speed Curve.xlsx.
+          Draw Curve B to model alternative velocity profiles and compare energy efficiency.
+        </p>
+        <p>
+          <strong>Formula:</strong> T_B = T_A × (P̄_B / P̄_A)^(1/3) where P = k·v³
         </p>
       </footer>
     </div>

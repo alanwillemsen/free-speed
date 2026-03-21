@@ -1,27 +1,46 @@
-import { calculateEnergy, estimateFinishTime } from '../utils/physics';
+import {
+  calculateEnergy,
+  calculateAveragePower,
+  estimateFinishTime,
+  calculateEnergyPenalty
+} from '../utils/physics';
 import { calculateAverageVelocity } from '../utils/curves';
 
-function Results({ optimalCurve, userCurve, params }) {
-  const strokeTime = 60 / params.strokeRate;
-  const targetAvgVelocity = params.raceDistance / (params.targetTime * 60);
-  const totalStrokes = Math.round((params.targetTime * 60) / strokeTime);
+function Results({ curveA, curveB, curveBNormalized, raceParams }) {
+  const { times: timesA, speeds: speedsA } = curveA;
+  const { times: timesB, speeds: speedsB } = curveB;
+  const { speeds: speedsBNorm } = curveBNormalized;
 
-  // Calculate energies
-  const optimalEnergy = calculateEnergy(optimalCurve, strokeTime);
-  const userEnergy = calculateEnergy(userCurve, strokeTime);
-  const energyDiff = userEnergy - optimalEnergy;
-  const energyDiffPercent = (energyDiff / optimalEnergy) * 100;
+  // Calculate energies and powers
+  const energyA = calculateEnergy(timesA, speedsA);
+  const energyB = calculateEnergy(timesB, speedsB);
+  const energyBNorm = calculateEnergy(timesB, speedsBNorm);
 
-  // Calculate user's actual average velocity
-  const userAvgVelocity = calculateAverageVelocity(userCurve);
-  const velocityDiff = userAvgVelocity - targetAvgVelocity;
+  const avgPowerA = calculateAveragePower(timesA, speedsA);
+  const avgPowerBNorm = calculateAveragePower(timesB, speedsBNorm);
 
-  // Estimate finish time if maintaining optimal energy budget
-  const estimate = estimateFinishTime(userCurve, optimalEnergy, {
-    strokeTime,
-    raceDistance: params.raceDistance,
-    targetTime: params.targetTime * 60, // convert to seconds
-  });
+  // Calculate average velocities
+  const avgVelocityA = calculateAverageVelocity(speedsA);
+  const avgVelocityB = calculateAverageVelocity(speedsB);
+  const avgVelocityBNorm = calculateAverageVelocity(speedsBNorm);
+
+  // Calculate stroke duration
+  const strokeDuration = timesA[timesA.length - 1] - timesA[0];
+
+  // Calculate race energy
+  const strokesPerRace = raceParams.raceTime / strokeDuration;
+  const totalRaceEnergyA = energyA * strokesPerRace;
+  const totalRaceEnergyBNorm = energyBNorm * strokesPerRace;
+
+  // Estimate finish time for Curve B with same energy budget
+  const finishTimeEstimate = estimateFinishTime(
+    raceParams.raceTime,
+    avgPowerA,
+    avgPowerBNorm
+  );
+
+  // Calculate energy penalty
+  const penalty = calculateEnergyPenalty(energyBNorm, energyA);
 
   const formatTime = (seconds) => {
     const mins = Math.floor(seconds / 60);
@@ -36,111 +55,161 @@ function Results({ optimalCurve, userCurve, params }) {
 
   return (
     <div className="results">
-      <h2>Analysis Results</h2>
+      <h2>Energy Equivalence Analysis</h2>
 
       <div className="results-grid">
-        <div className="result-section optimal">
-          <h3>Optimal Curve</h3>
-          <div className="metric">
-            <span className="metric-label">Energy per Stroke:</span>
-            <span className="metric-value">{optimalEnergy.toFixed(1)} J</span>
-          </div>
-          <div className="metric">
-            <span className="metric-label">Total Energy for Race:</span>
-            <span className="metric-value">{(optimalEnergy * totalStrokes).toFixed(0)} J</span>
-          </div>
+        {/* Curve A Stats */}
+        <div className="result-section curve-a">
+          <h3>Curve A (Reference)</h3>
           <div className="metric">
             <span className="metric-label">Average Velocity:</span>
-            <span className="metric-value">{targetAvgVelocity.toFixed(2)} m/s</span>
+            <span className="metric-value">{avgVelocityA.toFixed(3)} m/s</span>
           </div>
           <div className="metric">
-            <span className="metric-label">Finish Time:</span>
-            <span className="metric-value">{formatTime(params.targetTime * 60)}</span>
+            <span className="metric-label">Energy per Stroke:</span>
+            <span className="metric-value">{energyA.toFixed(1)} J</span>
+          </div>
+          <div className="metric">
+            <span className="metric-label">Average Power:</span>
+            <span className="metric-value">{avgPowerA.toFixed(1)} W</span>
+          </div>
+          <div className="metric">
+            <span className="metric-label">Total Race Energy:</span>
+            <span className="metric-value">{(totalRaceEnergyA / 1000).toFixed(1)} kJ</span>
+          </div>
+          <div className="metric">
+            <span className="metric-label">2km Finish Time:</span>
+            <span className="metric-value">{formatTime(raceParams.raceTime)}</span>
           </div>
         </div>
 
-        <div className="result-section user">
-          <h3>Your Curve</h3>
-          <div className="metric">
-            <span className="metric-label">Energy per Stroke:</span>
-            <span className="metric-value">{userEnergy.toFixed(1)} J</span>
-          </div>
-          <div className="metric">
-            <span className="metric-label">Total Energy for Race:</span>
-            <span className="metric-value">{(userEnergy * totalStrokes).toFixed(0)} J</span>
-          </div>
+        {/* Curve B Stats (Current) */}
+        <div className="result-section curve-b-current">
+          <h3>Curve B (Current)</h3>
           <div className="metric">
             <span className="metric-label">Average Velocity:</span>
             <span className="metric-value">
-              {userAvgVelocity.toFixed(2)} m/s
-              {Math.abs(velocityDiff) > 0.01 && (
-                <span className={`diff ${velocityDiff > 0 ? 'positive' : 'negative'}`}>
-                  {' '}({velocityDiff > 0 ? '+' : ''}{velocityDiff.toFixed(2)} m/s)
-                </span>
+              {avgVelocityB.toFixed(3)} m/s
+              {Math.abs(avgVelocityB - avgVelocityA) > 0.01 && (
+                <span className="diff-note"> (not normalized)</span>
               )}
             </span>
           </div>
-          <div className="metric highlight">
-            <span className="metric-label">Energy Difference:</span>
-            <span className={`metric-value ${energyDiff > 0 ? 'worse' : 'better'}`}>
-              {energyDiff > 0 ? '+' : ''}{energyDiff.toFixed(1)} J
-              ({energyDiffPercent > 0 ? '+' : ''}{energyDiffPercent.toFixed(1)}%)
-            </span>
+          <div className="metric">
+            <span className="metric-label">Energy per Stroke:</span>
+            <span className="metric-value">{energyB.toFixed(1)} J</span>
           </div>
         </div>
 
-        <div className="result-section comparison">
-          <h3>Energy Budget Analysis</h3>
+        {/* Curve B Normalized */}
+        <div className="result-section curve-b-norm">
+          <h3>Curve B (Normalized to Curve A)</h3>
+          <div className="metric">
+            <span className="metric-label">Average Velocity:</span>
+            <span className="metric-value">{avgVelocityBNorm.toFixed(3)} m/s</span>
+          </div>
+          <div className="metric">
+            <span className="metric-label">Energy per Stroke:</span>
+            <span className="metric-value">{energyBNorm.toFixed(1)} J</span>
+          </div>
+          <div className="metric">
+            <span className="metric-label">Average Power:</span>
+            <span className="metric-value">{avgPowerBNorm.toFixed(1)} W</span>
+          </div>
+          <div className="metric highlight">
+            <span className="metric-label">Energy Penalty:</span>
+            <span className={`metric-value ${penalty.penalty > 0 ? 'penalty' : 'bonus'}`}>
+              {penalty.penalty > 0 ? '+' : ''}{penalty.penalty.toFixed(1)} J
+              ({penalty.percentPenalty > 0 ? '+' : ''}{penalty.percentPenalty.toFixed(1)}%)
+            </span>
+          </div>
+          <div className="metric">
+            <span className="metric-label">Total Race Energy:</span>
+            <span className="metric-value">{(totalRaceEnergyBNorm / 1000).toFixed(1)} kJ</span>
+          </div>
+        </div>
+
+        {/* Energy Budget Prediction */}
+        <div className="result-section prediction">
+          <h3>Equivalent Finish Time Prediction</h3>
           <p className="explanation">
-            If you maintain the optimal energy per stroke ({optimalEnergy.toFixed(1)} J):
+            If the rower uses Curve B's efficiency profile but maintains Curve A's
+            total energy budget ({(totalRaceEnergyA / 1000).toFixed(1)} kJ):
           </p>
           <div className="metric highlight">
-            <span className="metric-label">Achievable Velocity:</span>
-            <span className="metric-value">{estimate.achievableAvgVelocity.toFixed(2)} m/s</span>
-          </div>
-          <div className="metric highlight">
             <span className="metric-label">Estimated Finish Time:</span>
-            <span className="metric-value">
-              {formatTime(estimate.finishTime)}
+            <span className={`metric-value ${finishTimeEstimate.timeDifference > 0 ? 'worse' : 'better'}`}>
+              {formatTime(finishTimeEstimate.finishTime)}
             </span>
           </div>
           <div className="metric highlight">
-            <span className="metric-label">Time vs Target:</span>
-            <span className={`metric-value ${estimate.timeDifference > 0 ? 'worse' : 'better'}`}>
-              {formatTimeDiff(estimate.timeDifference)}
+            <span className="metric-label">Time Difference:</span>
+            <span className={`metric-value ${finishTimeEstimate.timeDifference > 0 ? 'worse' : 'better'}`}>
+              {formatTimeDiff(finishTimeEstimate.timeDifference)}
             </span>
+          </div>
+          <div className="metric">
+            <span className="metric-label">Power Ratio (B/A):</span>
+            <span className="metric-value">{finishTimeEstimate.ratio.toFixed(4)}</span>
           </div>
         </div>
       </div>
 
+      {/* Insights */}
       <div className="insights">
         <h3>Key Insights</h3>
         <ul>
-          {energyDiff > optimalEnergy * 0.05 && (
+          {penalty.percentPenalty > 5 && (
             <li className="insight-warning">
-              Your curve requires {energyDiffPercent.toFixed(1)}% more energy due to speed
-              variation. The cubic relationship between power and velocity means varying
-              speed is energetically expensive.
+              <strong>High Energy Penalty:</strong> Curve B requires {penalty.percentPenalty.toFixed(1)}%
+              more energy than Curve A at the same average velocity due to greater speed variation.
+              This is caused by the cubic power-velocity relationship (P ∝ v³).
             </li>
           )}
-          {Math.abs(velocityDiff) > 0.1 && (
+          {penalty.percentPenalty > 1 && penalty.percentPenalty <= 5 && (
             <li className="insight-info">
-              Your average velocity differs from target by {Math.abs(velocityDiff).toFixed(2)} m/s.
-              This affects both finish time and energy requirements.
+              <strong>Moderate Energy Penalty:</strong> Curve B shows {penalty.percentPenalty.toFixed(1)}%
+              higher energy expenditure due to velocity fluctuations ("boat check").
             </li>
           )}
-          {energyDiff < optimalEnergy * 0.02 && energyDiff > 0 && (
+          {penalty.percentPenalty <= 1 && penalty.percentPenalty > -1 && (
             <li className="insight-success">
-              Your curve is very close to optimal efficiency! Speed variation is minimal.
+              <strong>Similar Efficiency:</strong> Curve B has nearly the same energy profile
+              as Curve A. The velocity variation patterns are comparable.
             </li>
           )}
-          {estimate.timeDifference < -5 && (
-            <li className="insight-success">
-              With optimal energy usage, your curve could achieve a finish time
-              {Math.abs(estimate.timeDifference).toFixed(1)}s faster than target!
+          {finishTimeEstimate.timeDifference > 5 && (
+            <li className="insight-warning">
+              <strong>Significant Time Impact:</strong> Using Curve B's efficiency profile
+              with the same energy budget would result in a {formatTimeDiff(finishTimeEstimate.timeDifference)}
+              slower finish time. Reducing "boat check" is critical for performance.
             </li>
           )}
+          {finishTimeEstimate.timeDifference > 1 && finishTimeEstimate.timeDifference <= 5 && (
+            <li className="insight-info">
+              <strong>Measurable Time Impact:</strong> The efficiency difference translates
+              to {formatTimeDiff(finishTimeEstimate.timeDifference)} in a 2km race.
+            </li>
+          )}
+          <li className="insight-info">
+            <strong>Physics Principle:</strong> Because power scales as v³, maintaining steadier
+            boat speed throughout the stroke cycle minimizes energy waste and improves race times.
+          </li>
         </ul>
+      </div>
+
+      {/* Calculation Details */}
+      <div className="calculation-details">
+        <h4>Calculation Methodology</h4>
+        <p>
+          Energy is calculated using: E = ∫ P(t) dt = ∫ k·v(t)³ dt
+        </p>
+        <p>
+          Finish time estimate uses: T_B = T_A × (P̄_B / P̄_A)^(1/3)
+        </p>
+        <p>
+          Stroke rate: {(60 / strokeDuration).toFixed(1)} strokes/min
+        </p>
       </div>
     </div>
   );

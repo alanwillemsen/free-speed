@@ -1,101 +1,112 @@
 /**
- * Physics calculations for rowing dynamics
- * Simplified model: drag force proportional to v³
+ * Physics calculations for rowing energy equivalence modeling
+ * Based on P(t) = k * v(t)^3
  */
 
-// Drag coefficient calibrated such that constant velocity achieves target time
-// We'll calibrate this based on the default parameters
-let dragCoefficient = 1.0; // Will be set by calibration
+// Drag coefficient - calibrated value for rowing
+const DRAG_COEFFICIENT = 50.0; // kg/m
 
 /**
- * Set the drag coefficient based on race parameters
- * For constant velocity rowing, we need the coefficient that makes the physics work out
- */
-export function calibrateDragCoefficient(avgVelocity) {
-  // We use a simplified model where power = k * v³
-  // The coefficient is calibrated so our calculations are relative
-  // Using a reference value based on typical rowing physics
-  dragCoefficient = 50.0; // Empirical constant for rowing (kg/m)
-}
-
-/**
- * Calculate drag force at a given velocity
- * F = k * v² (simplified from full fluid dynamics)
- */
-export function calculateDragForce(velocity) {
-  return dragCoefficient * velocity * velocity;
-}
-
-/**
- * Calculate power required at a given velocity
- * P = F * v = k * v³
+ * Calculate power at a given velocity
+ * P = k * v^3
  */
 export function calculatePower(velocity) {
-  return dragCoefficient * velocity * velocity * velocity;
+  return DRAG_COEFFICIENT * Math.pow(velocity, 3);
 }
 
 /**
- * Calculate energy for a speed curve over one stroke
- * Integrates power over time using trapezoidal rule
+ * Calculate total energy for a velocity curve over time
+ * E = ∫ P(t) dt = ∫ k * v(t)^3 dt
  *
- * @param {Array<number>} speedCurve - Array of velocities (m/s)
- * @param {number} strokeTime - Duration of one stroke (seconds)
- * @returns {number} Energy in Joules
+ * Uses trapezoidal integration
  */
-export function calculateEnergy(speedCurve, strokeTime) {
-  if (speedCurve.length < 2) return 0;
-
-  const dt = strokeTime / (speedCurve.length - 1);
-  let energy = 0;
-
-  // Trapezoidal integration: E = ∫ P dt
-  for (let i = 0; i < speedCurve.length - 1; i++) {
-    const p1 = calculatePower(speedCurve[i]);
-    const p2 = calculatePower(speedCurve[i + 1]);
-    energy += (p1 + p2) / 2 * dt;
+export function calculateEnergy(times, speeds) {
+  if (times.length !== speeds.length || times.length < 2) {
+    return 0;
   }
 
-  return energy;
+  let totalEnergy = 0;
+
+  for (let i = 0; i < times.length - 1; i++) {
+    const dt = times[i + 1] - times[i];
+    const p1 = calculatePower(speeds[i]);
+    const p2 = calculatePower(speeds[i + 1]);
+
+    // Trapezoidal rule: (P1 + P2) / 2 * dt
+    totalEnergy += (p1 + p2) / 2 * dt;
+  }
+
+  return totalEnergy;
 }
 
 /**
- * Estimate finish time if user maintains optimal energy budget
- *
- * @param {Array<number>} userCurve - User's speed curve
- * @param {number} optimalEnergy - Energy per stroke for optimal curve
- * @param {object} params - Race parameters
- * @returns {object} { finishTime, timeDifference, userEnergy, userAvgVelocity }
+ * Calculate average power for a curve
  */
-export function estimateFinishTime(userCurve, optimalEnergy, params) {
-  const { strokeTime, raceDistance, targetTime } = params;
+export function calculateAveragePower(times, speeds) {
+  const totalEnergy = calculateEnergy(times, speeds);
+  const totalTime = times[times.length - 1] - times[0];
+  return totalEnergy / totalTime;
+}
 
-  // Calculate user's actual average velocity and energy
-  const userAvgVelocity = userCurve.reduce((sum, v) => sum + v, 0) / userCurve.length;
-  const userEnergy = calculateEnergy(userCurve, strokeTime);
+/**
+ * Calculate energy for a full race
+ * @param {number} strokeEnergy - Energy per stroke
+ * @param {number} raceTime - Total race time in seconds
+ * @param {number} strokeDuration - Duration of one stroke in seconds
+ */
+export function calculateRaceEnergy(strokeEnergy, raceTime, strokeDuration) {
+  const numStrokes = raceTime / strokeDuration;
+  return strokeEnergy * numStrokes;
+}
 
-  // If user curve uses same energy per stroke, what average velocity could they achieve?
-  // Since E = ∫(k*v³)dt, for constant velocity: E = k*v³*T
-  // So v = (E / (k*T))^(1/3)
-  const achievableAvgVelocity = Math.pow(optimalEnergy / (dragCoefficient * strokeTime), 1/3);
-
-  // Calculate finish time with this velocity
-  const finishTime = raceDistance / achievableAvgVelocity;
-  const timeDifference = finishTime - targetTime;
+/**
+ * Estimate finish time for Curve B when constrained to Curve A's energy budget
+ *
+ * Formula: T_B = T_A * (MeanPower_B / MeanPower_A)^(1/3)
+ *
+ * @param {number} referenceTime - Finish time for Curve A (seconds)
+ * @param {number} referencePower - Average power for Curve A
+ * @param {number} testPower - Average power for Curve B (at same avg velocity)
+ */
+export function estimateFinishTime(referenceTime, referencePower, testPower) {
+  const ratio = testPower / referencePower;
+  const finishTime = referenceTime * Math.pow(ratio, 1/3);
+  const timeDifference = finishTime - referenceTime;
 
   return {
     finishTime,
     timeDifference,
-    userEnergy,
-    userAvgVelocity,
-    achievableAvgVelocity
+    ratio,
+    percentIncrease: ((ratio - 1) * 100)
   };
 }
 
 /**
- * Calculate the theoretical minimum energy for a given average velocity
- * This is the energy for perfectly constant velocity
+ * Calculate the energy penalty (extra energy due to velocity variation)
  */
-export function calculateMinimumEnergy(avgVelocity, strokeTime) {
-  const constantPower = calculatePower(avgVelocity);
-  return constantPower * strokeTime;
+export function calculateEnergyPenalty(actualEnergy, optimalEnergy) {
+  return {
+    penalty: actualEnergy - optimalEnergy,
+    percentPenalty: ((actualEnergy / optimalEnergy - 1) * 100)
+  };
+}
+
+/**
+ * Scale a curve to achieve a target average velocity
+ * Returns the scaling factor needed
+ */
+export function calculateScalingFactor(currentAvg, targetAvg) {
+  return targetAvg / currentAvg;
+}
+
+/**
+ * Calculate what average velocity Curve B could achieve with Curve A's energy budget
+ *
+ * If energy_A = ∫ k * v_A^3 dt and we want energy_B = energy_A with curve shape B:
+ * energy_A = ∫ k * (c * v_B)^3 dt = c^3 * ∫ k * v_B^3 dt
+ * So: c = (energy_A / energy_B)^(1/3)
+ */
+export function calculateEquivalentVelocity(energyA, energyB, avgVelocityB) {
+  const scalingFactor = Math.pow(energyA / energyB, 1/3);
+  return avgVelocityB * scalingFactor;
 }

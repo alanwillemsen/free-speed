@@ -1,86 +1,52 @@
 /**
- * Curve generation and manipulation utilities
+ * Curve manipulation and normalization utilities
  */
 
 /**
- * Generate an optimal speed curve (nearly constant with slight sinusoidal variation)
- * This represents the most energy-efficient speed profile
- *
- * @param {number} avgVelocity - Target average velocity (m/s)
- * @param {number} strokeTime - Duration of one stroke (seconds)
- * @param {number} numPoints - Number of data points
- * @returns {Array<number>} Speed curve values
+ * Calculate average velocity from time and speed arrays
  */
-export function generateOptimalCurve(avgVelocity, strokeTime, numPoints = 100) {
-  const curve = [];
-
-  // Create a gentle sinusoidal variation (±3% of average)
-  // This represents realistic minimal variation in rowing
-  const amplitude = avgVelocity * 0.03;
-
-  for (let i = 0; i < numPoints; i++) {
-    const t = i / (numPoints - 1); // 0 to 1
-    const angle = t * 2 * Math.PI; // One complete cycle
-
-    // Sine wave with slight variation
-    // Lower speed during recovery (latter half), higher during drive
-    const variation = amplitude * Math.sin(angle - Math.PI / 2);
-    curve.push(avgVelocity + variation);
-  }
-
-  // Normalize to ensure exact average
-  return normalizeCurve(curve, avgVelocity);
-}
-
-/**
- * Calculate the average velocity of a speed curve
- *
- * @param {Array<number>} curve - Speed curve values
- * @returns {number} Average velocity
- */
-export function calculateAverageVelocity(curve) {
-  if (curve.length === 0) return 0;
-  const sum = curve.reduce((acc, val) => acc + val, 0);
-  return sum / curve.length;
+export function calculateAverageVelocity(speeds) {
+  if (speeds.length === 0) return 0;
+  const sum = speeds.reduce((acc, v) => acc + v, 0);
+  return sum / speeds.length;
 }
 
 /**
  * Normalize a curve to match a target average velocity
- *
- * @param {Array<number>} curve - Input curve
- * @param {number} targetAvg - Target average velocity
- * @returns {Array<number>} Normalized curve
+ * Multiplies all speeds by a scaling factor
  */
-export function normalizeCurve(curve, targetAvg) {
-  const currentAvg = calculateAverageVelocity(curve);
-  if (currentAvg === 0) return curve;
+export function normalizeCurve(speeds, targetAvg) {
+  const currentAvg = calculateAverageVelocity(speeds);
+  if (currentAvg === 0) return speeds;
 
-  const scale = targetAvg / currentAvg;
-  return curve.map(v => v * scale);
+  const scalingFactor = targetAvg / currentAvg;
+  return speeds.map(v => v * scalingFactor);
+}
+
+/**
+ * Scale a curve by a factor
+ */
+export function scaleCurve(speeds, factor) {
+  return speeds.map(v => v * factor);
 }
 
 /**
  * Smooth a curve using moving average
- * Helps remove jagged edges from user drawing
- *
- * @param {Array<number>} curve - Input curve
- * @param {number} windowSize - Size of smoothing window (odd number)
- * @returns {Array<number>} Smoothed curve
  */
-export function smoothCurve(curve, windowSize = 5) {
-  if (curve.length < windowSize) return [...curve];
+export function smoothCurve(values, windowSize = 3) {
+  if (values.length < windowSize) return [...values];
 
   const smoothed = [];
   const halfWindow = Math.floor(windowSize / 2);
 
-  for (let i = 0; i < curve.length; i++) {
+  for (let i = 0; i < values.length; i++) {
     let sum = 0;
     let count = 0;
 
     for (let j = -halfWindow; j <= halfWindow; j++) {
       const idx = i + j;
-      if (idx >= 0 && idx < curve.length) {
-        sum += curve[idx];
+      if (idx >= 0 && idx < values.length) {
+        sum += values[idx];
         count++;
       }
     }
@@ -92,61 +58,114 @@ export function smoothCurve(curve, windowSize = 5) {
 }
 
 /**
- * Update curve at a specific position (for drawing interaction)
- *
- * @param {Array<number>} curve - Current curve
- * @param {number} xRatio - X position (0 to 1)
- * @param {number} yValue - New Y value (velocity)
- * @param {number} brushSize - Size of influence area
- * @returns {Array<number>} Updated curve
+ * Resample a curve to match the time points of another curve
+ * Uses linear interpolation
  */
-export function updateCurveAtPoint(curve, xRatio, yValue, brushSize = 5) {
-  const newCurve = [...curve];
-  const centerIdx = Math.round(xRatio * (curve.length - 1));
+export function resampleCurve(sourceTimes, sourceSpeeds, targetTimes) {
+  const resampled = [];
 
-  // Update points within brush size using Gaussian-like falloff
-  for (let i = 0; i < curve.length; i++) {
-    const distance = Math.abs(i - centerIdx);
-    if (distance <= brushSize) {
-      const influence = 1 - (distance / brushSize);
-      // Blend between old and new value based on influence
-      newCurve[i] = curve[i] * (1 - influence) + yValue * influence;
+  for (const targetTime of targetTimes) {
+    // Find the two points to interpolate between
+    let i = 0;
+    while (i < sourceTimes.length - 1 && sourceTimes[i + 1] < targetTime) {
+      i++;
+    }
+
+    if (targetTime <= sourceTimes[0]) {
+      resampled.push(sourceSpeeds[0]);
+    } else if (targetTime >= sourceTimes[sourceTimes.length - 1]) {
+      resampled.push(sourceSpeeds[sourceSpeeds.length - 1]);
+    } else {
+      // Linear interpolation
+      const t1 = sourceTimes[i];
+      const t2 = sourceTimes[i + 1];
+      const v1 = sourceSpeeds[i];
+      const v2 = sourceSpeeds[i + 1];
+
+      const ratio = (targetTime - t1) / (t2 - t1);
+      const interpolated = v1 + ratio * (v2 - v1);
+      resampled.push(interpolated);
     }
   }
 
-  return newCurve;
+  return resampled;
 }
 
 /**
- * Generate a realistic rowing curve with distinct drive and recovery phases
- * Alternative to optimal curve for demonstration
- *
- * @param {number} avgVelocity - Target average velocity
- * @param {number} strokeTime - Duration of one stroke
- * @param {number} numPoints - Number of data points
- * @returns {Array<number>} Speed curve
+ * Generate a simple curve for initial Curve B
+ * Creates a curve similar to the reference but with adjustable variation
  */
-export function generateRealisticCurve(avgVelocity, strokeTime, numPoints = 100) {
-  const curve = [];
+export function generateSimilarCurve(referenceTimes, referenceSpeeds, variationFactor = 1.0) {
+  const avgSpeed = calculateAverageVelocity(referenceSpeeds);
 
-  for (let i = 0; i < numPoints; i++) {
-    const t = i / (numPoints - 1);
+  // Create a curve with similar shape but potentially different variation
+  const newSpeeds = referenceSpeeds.map((speed, i) => {
+    const deviation = speed - avgSpeed;
+    return avgSpeed + deviation * variationFactor;
+  });
 
-    // Drive phase: 0-0.5, rapid acceleration then deceleration
-    // Recovery phase: 0.5-1.0, slower return
-    let velocity;
-    if (t < 0.5) {
-      // Drive: starts slower, peaks mid-drive, ends fast
-      const driveT = t * 2;
-      velocity = avgVelocity * (0.85 + 0.3 * Math.sin(driveT * Math.PI));
-    } else {
-      // Recovery: starts fast, slows down gradually
-      const recoveryT = (t - 0.5) * 2;
-      velocity = avgVelocity * (1.15 - 0.3 * Math.sin(recoveryT * Math.PI));
+  return newSpeeds;
+}
+
+/**
+ * Update curve at a specific position (for drawing)
+ * Updates points within a brush radius
+ */
+export function updateCurveAtPoint(times, speeds, targetTime, targetSpeed, brushRadius = 0.1) {
+  const newSpeeds = [...speeds];
+
+  for (let i = 0; i < times.length; i++) {
+    const timeDiff = Math.abs(times[i] - targetTime);
+
+    if (timeDiff <= brushRadius) {
+      // Gaussian-like falloff
+      const influence = Math.exp(-(timeDiff * timeDiff) / (2 * brushRadius * brushRadius / 9));
+
+      // Blend between old and new value
+      newSpeeds[i] = speeds[i] * (1 - influence * 0.5) + targetSpeed * (influence * 0.5);
     }
-
-    curve.push(velocity);
   }
 
-  return normalizeCurve(curve, avgVelocity);
+  return newSpeeds;
+}
+
+/**
+ * Find the closest time index for a given time value
+ */
+export function findClosestTimeIndex(times, targetTime) {
+  let closestIndex = 0;
+  let closestDiff = Math.abs(times[0] - targetTime);
+
+  for (let i = 1; i < times.length; i++) {
+    const diff = Math.abs(times[i] - targetTime);
+    if (diff < closestDiff) {
+      closestDiff = diff;
+      closestIndex = i;
+    }
+  }
+
+  return closestIndex;
+}
+
+/**
+ * Calculate statistics for a curve
+ */
+export function calculateCurveStats(speeds) {
+  const avg = calculateAverageVelocity(speeds);
+  const min = Math.min(...speeds);
+  const max = Math.max(...speeds);
+  const range = max - min;
+
+  // Calculate variance and standard deviation
+  const variance = speeds.reduce((sum, v) => sum + Math.pow(v - avg, 2), 0) / speeds.length;
+  const stdDev = Math.sqrt(variance);
+
+  return {
+    avg,
+    min,
+    max,
+    range,
+    variance,
+    stdDev
+  };
 }
