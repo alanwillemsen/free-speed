@@ -25,95 +25,132 @@ ChartJS.register(
   annotationPlugin
 );
 
-function SpeedChart({ curveA, curveB, onCurveBChange, onStrokeDurationChange, landmarks }) {
+function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landmarksB, energyPenaltyPercent, strokeRate, onStrokeRateChange }) {
   const chartRef = useRef(null);
   const [isDrawing, setIsDrawing] = useState(false);
-  const [isDraggingEndpoint, setIsDraggingEndpoint] = useState(false);
 
   const { times: timesA, speeds: speedsA } = curveA;
   const { times: timesB, speeds: speedsB } = curveB;
+
+  // Convert phase [0,1] to time in seconds at the given stroke rate
+  const strokeDuration = 60 / strokeRate;
+  const timesA_s = timesA.map(t => t * strokeDuration);
+  const timesB_s = timesB.map(t => t * strokeDuration);
 
   // Create annotations for landmarks
   const landmarkAnnotations = {};
   if (landmarks && landmarks.length > 0) {
     landmarks.forEach((landmark, idx) => {
-      const timeIndex = timesA.findIndex(t => Math.abs(t - landmark.time) < 0.01);
-      if (timeIndex !== -1) {
-        landmarkAnnotations[`landmark_${idx}`] = {
-          type: 'line',
-          xMin: timeIndex,
-          xMax: timeIndex,
-          borderColor: 'rgba(100, 100, 100, 0.6)',
-          borderWidth: 1,
-          borderDash: [3, 3],
-          label: {
-            display: true,
-            content: landmark.label,
-            position: 'start',
-            backgroundColor: 'rgba(0, 0, 0, 0.7)',
-            color: 'white',
-            font: {
-              size: 9,
-              weight: 'normal'
-            },
-            padding: 3,
-            rotation: 0
-          }
-        };
-      }
+      landmarkAnnotations[`landmark_${idx}`] = {
+        type: 'line',
+        xMin: landmark.time * strokeDuration,
+        xMax: landmark.time * strokeDuration,
+        borderColor: 'rgba(100, 100, 100, 0.6)',
+        borderWidth: 1,
+        borderDash: [3, 3],
+        label: {
+          display: true,
+          content: landmark.label,
+          position: 'start',
+          backgroundColor: 'rgba(75, 192, 192, 0.85)',
+          color: 'white',
+          font: {
+            size: 9,
+            weight: 'normal'
+          },
+          padding: 3,
+          rotation: 0
+        }
+      };
     });
   }
 
-  // Add draggable endpoint for Curve B
-  const endpointIndex = timesB.length - 1;
-  landmarkAnnotations['curveBEndpoint'] = {
-    type: 'point',
-    xValue: endpointIndex,
-    yValue: speedsB[endpointIndex],
-    backgroundColor: 'rgba(255, 99, 132, 0.8)',
-    borderColor: 'rgb(255, 99, 132)',
-    borderWidth: 3,
-    radius: 8,
-    label: {
-      display: true,
-      content: '← Drag to adjust stroke rate',
-      position: 'end',
-      backgroundColor: 'rgba(255, 99, 132, 0.9)',
-      color: 'white',
-      font: {
-        size: 10,
-        weight: 'bold'
-      },
-      padding: 4
-    }
+  // Crew B landmark annotations
+  if (landmarksB && landmarksB.length > 0) {
+    landmarksB.forEach((landmark, idx) => {
+      landmarkAnnotations[`landmarkB_${idx}`] = {
+        type: 'line',
+        xMin: landmark.time * strokeDuration,
+        xMax: landmark.time * strokeDuration,
+        borderColor: 'rgba(255, 99, 132, 0.7)',
+        borderWidth: 1,
+        borderDash: [3, 3],
+        label: {
+          display: true,
+          content: landmark.label,
+          position: 'end',
+          backgroundColor: 'rgba(255, 99, 132, 0.85)',
+          color: 'white',
+          font: {
+            size: 9,
+            weight: 'normal'
+          },
+          padding: 3,
+          rotation: 0
+        }
+      };
+    });
+  }
+
+  // Phase duration labels for each crew
+  const findLm = (lms, label) => lms?.find(l => l.label === label);
+
+  const addPhaseLabels = (lms, prefix, yRow, bgColor) => {
+    const entry      = findLm(lms, 'ENTRY');
+    const extraction = findLm(lms, 'EXTRACTION');
+    const bodiesOver = findLm(lms, 'BODIES OVER');
+
+    const phases = [
+      { key: 'catch',    name: 'Catch',    start: 0,                end: entry?.time      },
+      { key: 'drive',    name: 'Drive',    start: entry?.time,      end: extraction?.time },
+      { key: 'hang',     name: 'Hang',     start: extraction?.time, end: bodiesOver?.time },
+      { key: 'recovery', name: 'Recovery', start: extraction?.time, end: 1.0              },
+    ];
+
+    phases.forEach(({ key, name, start, end }) => {
+      if (start == null || end == null || end <= start) return;
+      const startS = start * strokeDuration;
+      const endS = end * strokeDuration;
+      landmarkAnnotations[`${prefix}_phase_${key}`] = {
+        type: 'label',
+        xValue: (startS + endS) / 2,
+        yValue: yRow,
+        content: [`${name}: ${(endS - startS).toFixed(2)}s`],
+        backgroundColor: bgColor,
+        color: 'white',
+        font: { size: 9 },
+        padding: { x: 5, y: 2 },
+        textAlign: 'center',
+      };
+    });
   };
 
-  // Calculate stroke rates
-  const strokeRateA = 60 / timesA[timesA.length - 1];
-  const strokeRateB = 60 / timesB[timesB.length - 1];
+  addPhaseLabels(landmarks,  'A', 2.7,  'rgba(75, 192, 192, 0.85)');
+  addPhaseLabels(landmarksB, 'B', 7.3,  'rgba(255, 99, 132, 0.85)');
 
-  // Create data arrays with x,y coordinates using actual time values
-  const dataA = speedsA.map((speed, i) => ({ x: timesA[i], y: speed }));
-  const dataB = speedsB.map((speed, i) => ({ x: timesB[i], y: speed }));
+  // Create data arrays with x,y coordinates using time in seconds
+  const dataA = speedsA.map((speed, i) => ({ x: timesA_s[i], y: speed }));
+  const dataB = speedsB.map((speed, i) => ({ x: timesB_s[i], y: speed }));
 
   const data = {
     datasets: [
       {
-        label: `Curve B (${strokeRateB.toFixed(1)} spm)`,
-        data: dataB,
-        borderColor: 'rgba(255, 99, 132, 1)',
-        backgroundColor: 'rgba(255, 99, 132, 0.1)',
-        borderWidth: 3,
+        label: 'Crew A (Reference)',
+        data: dataA,
+        borderColor: 'rgba(75, 192, 192, 1)',
+        backgroundColor: 'rgba(75, 192, 192, 0.1)',
+        borderWidth: 4,
+        borderDash: [5, 5],
         pointRadius: 0,
         tension: 0.4,
         fill: false,
       },
       {
-        label: `Curve A (${strokeRateA.toFixed(1)} spm)`,
-        data: dataA,
-        borderColor: 'rgba(75, 192, 192, 0.7)',
-        backgroundColor: 'rgba(75, 192, 192, 0.1)',
-        borderWidth: 2,
+        label: 'Crew B',
+        data: dataB,
+        borderColor: 'rgba(255, 99, 132, 1)',
+        backgroundColor: 'rgba(255, 99, 132, 0.1)',
+        borderWidth: 3,
         pointRadius: 0,
         tension: 0.4,
         fill: false,
@@ -132,22 +169,33 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onStrokeDurationChange, la
       legend: {
         position: 'top',
         labels: {
+          usePointStyle: true,
+          pointStyle: 'line',
           font: {
             size: 14,
             weight: 'bold'
+          },
+          generateLabels: (chart) => {
+            const labels = ChartJS.defaults.plugins.legend.labels.generateLabels(chart);
+            labels.forEach(label => {
+              if (label.text === 'Crew A (Reference)') {
+                label.lineDash = [5, 5];
+              }
+            });
+            return labels;
           }
         }
       },
       title: {
         display: true,
-        text: 'Intra-Stroke Velocity Curves',
+        text: 'Speed Curves',
         font: {
           size: 18,
           weight: 'bold'
         },
       },
       tooltip: {
-        enabled: false, // Disable tooltip so it doesn't interfere with drawing
+        enabled: false,
       },
       annotation: {
         annotations: landmarkAnnotations
@@ -157,10 +205,10 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onStrokeDurationChange, la
       x: {
         type: 'linear',
         min: 0,
-        max: 3,
+        max: strokeDuration,
         title: {
           display: true,
-          text: 'Time in Stroke (seconds)',
+          text: `Time (s) at ${strokeRate} strokes/min`,
           font: {
             size: 14,
             weight: 'bold'
@@ -168,6 +216,7 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onStrokeDurationChange, la
         },
         ticks: {
           maxTicksLimit: 10,
+          callback: (val) => val.toFixed(2),
           font: {
             size: 11
           }
@@ -182,8 +231,8 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onStrokeDurationChange, la
             weight: 'bold'
           }
         },
-        min: 3,
-        max: 7,
+        min: 2,
+        max: 8,
         ticks: {
           font: {
             size: 11
@@ -191,47 +240,6 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onStrokeDurationChange, la
         }
       },
     },
-  };
-
-  // Handle drawing on the chart
-  const handleMouseDown = (event) => {
-    const chart = chartRef.current;
-    if (!chart) return;
-
-    const canvasPosition = chart.canvas.getBoundingClientRect();
-    const x = event.clientX - canvasPosition.left;
-    const xScale = chart.scales.x;
-    const xValue = xScale.getValueForPixel(x);
-    const xIndex = Math.round(xValue);
-
-    console.log('Mouse down at xIndex:', xIndex, 'total points:', timesA.length);
-
-    // Check if clicking near the RIGHT edge of the chart (last 10% of x-axis)
-    const totalLabels = timesA.length;
-    const endpointThreshold = Math.floor(totalLabels * 0.9);
-
-    if (xIndex >= endpointThreshold) {
-      console.log('ENDPOINT DRAG STARTED');
-      setIsDraggingEndpoint(true);
-      event.preventDefault();
-    } else {
-      console.log('Normal drawing');
-      setIsDrawing(true);
-      updateCurveFromMouse(event);
-    }
-  };
-
-  const handleMouseMove = (event) => {
-    if (isDrawing) {
-      updateCurveFromMouse(event);
-    } else if (isDraggingEndpoint) {
-      updateStrokeDurationFromMouse(event);
-    }
-  };
-
-  const handleMouseUp = () => {
-    setIsDrawing(false);
-    setIsDraggingEndpoint(false);
   };
 
   const updateCurveFromMouse = (event) => {
@@ -242,80 +250,81 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onStrokeDurationChange, la
     const x = event.clientX - canvasPosition.left;
     const y = event.clientY - canvasPosition.top;
 
-    // Get the chart scales
     const xScale = chart.scales.x;
     const yScale = chart.scales.y;
 
-    // Convert pixel coordinates to data coordinates
-    const xIndex = Math.round(xScale.getValueForPixel(x));
+    const xValue = xScale.getValueForPixel(x);
     const yValue = yScale.getValueForPixel(y);
 
-    if (xIndex >= 0 && xIndex < speedsB.length && yValue > 0 && yValue < 10) {
-      // Freehand drawing - directly set the value at this point
+    // Find the closest index in timesB_s (times in seconds)
+    const closestIndex = timesB_s.reduce((best, t, i) =>
+      Math.abs(t - xValue) < Math.abs(timesB_s[best] - xValue) ? i : best, 0);
+
+    if (closestIndex >= 0 && closestIndex < speedsB.length && yValue > 0 && yValue < 10) {
       const newSpeeds = [...speedsB];
-      newSpeeds[xIndex] = yValue;
+      newSpeeds[closestIndex] = yValue;
       onCurveBChange(newSpeeds);
     }
   };
 
-  const updateStrokeDurationFromMouse = (event) => {
-    const chart = chartRef.current;
-    if (!chart) return;
-
-    const canvasPosition = chart.canvas.getBoundingClientRect();
-    const x = event.clientX - canvasPosition.left;
-    const xScale = chart.scales.x;
-
-    // Get the time value directly from the linear scale
-    const newDuration = xScale.getValueForPixel(x);
-
-    console.log('Updating duration to:', newDuration.toFixed(2), 'seconds');
-
-    // Don't allow stroke duration to be too short or too long
-    if (newDuration >= 0.5 && newDuration <= 3.0) {
-      onStrokeDurationChange(newDuration);
-    }
+  const handleMouseDown = (event) => {
+    setIsDrawing(true);
+    updateCurveFromMouse(event);
   };
 
-  // Add event listeners for drawing
+  const handleMouseMove = (event) => {
+    if (isDrawing) updateCurveFromMouse(event);
+  };
+
+  const handleMouseUp = () => {
+    setIsDrawing(false);
+  };
+
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
 
     const canvas = chart.canvas;
-    if (isDrawing) {
-      canvas.style.cursor = 'crosshair';
-    } else if (isDraggingEndpoint) {
-      canvas.style.cursor = 'ew-resize';
-    } else {
-      canvas.style.cursor = 'default';
-    }
+    canvas.style.cursor = isDrawing ? 'crosshair' : 'default';
 
-    const handleMouseDownWrapper = (e) => handleMouseDown(e);
-    const handleMouseMoveWrapper = (e) => handleMouseMove(e);
-    const handleMouseUpWrapper = () => handleMouseUp();
-    const handleMouseLeaveWrapper = () => handleMouseUp();
+    const onDown = (e) => handleMouseDown(e);
+    const onMove = (e) => handleMouseMove(e);
+    const onUp = () => handleMouseUp();
 
-    canvas.addEventListener('mousedown', handleMouseDownWrapper);
-    canvas.addEventListener('mousemove', handleMouseMoveWrapper);
-    canvas.addEventListener('mouseup', handleMouseUpWrapper);
-    canvas.addEventListener('mouseleave', handleMouseLeaveWrapper);
+    canvas.addEventListener('mousedown', onDown);
+    canvas.addEventListener('mousemove', onMove);
+    canvas.addEventListener('mouseup', onUp);
+    canvas.addEventListener('mouseleave', onUp);
 
     return () => {
-      canvas.removeEventListener('mousedown', handleMouseDownWrapper);
-      canvas.removeEventListener('mousemove', handleMouseMoveWrapper);
-      canvas.removeEventListener('mouseup', handleMouseUpWrapper);
-      canvas.removeEventListener('mouseleave', handleMouseLeaveWrapper);
+      canvas.removeEventListener('mousedown', onDown);
+      canvas.removeEventListener('mousemove', onMove);
+      canvas.removeEventListener('mouseup', onUp);
+      canvas.removeEventListener('mouseleave', onUp);
     };
-  }, [isDrawing, isDraggingEndpoint, speedsB, timesB]);
+  }, [isDrawing, speedsB, timesB, strokeRate]);
 
   return (
     <div className="chart-container">
       <div className="chart-instructions">
-        <strong>Draw:</strong> Click and drag to draw Curve B. <strong>Adjust stroke rate:</strong> Drag the endpoint left/right. Comparison updates automatically.
+        <strong>Draw Crew B:</strong> Click and drag to draw a velocity profile. It will be scaled to match Crew A's average speed —
+        currently requiring <strong>{energyPenaltyPercent > 0 ? '+' : ''}{(Math.round(energyPenaltyPercent * 10) / 10 || 0).toFixed(1)}% energy</strong> to maintain the same pace.
+        <button className="btn btn-secondary" style={{ marginLeft: '1rem' }} onClick={onReset}>Reset</button>
+        <label style={{ marginLeft: '1.5rem', fontSize: '0.9rem' }}>
+          Stroke rate:&nbsp;
+          <input
+            type="number"
+            value={strokeRate}
+            min="10"
+            max="60"
+            onChange={e => { const v = parseInt(e.target.value); if (v >= 10 && v <= 60) onStrokeRateChange(v); }}
+            style={{ width: '3.5rem', textAlign: 'center' }}
+          />
+          &nbsp;spm
+        </label>
       </div>
       <div className="chart-wrapper">
-        <Line ref={chartRef} data={data} options={options} />
+        <Line key={strokeRate} ref={chartRef} data={data} options={options} />
       </div>
     </div>
   );

@@ -130,6 +130,60 @@ export function updateCurveAtPoint(times, speeds, targetTime, targetSpeed, brush
 }
 
 /**
+ * Interpolate speed at a given phase using linear interpolation
+ */
+function interpolateSpeed(times, speeds, t) {
+  if (t <= times[0]) return speeds[0];
+  if (t >= times[times.length - 1]) return speeds[speeds.length - 1];
+  let i = 0;
+  while (i < times.length - 1 && times[i + 1] <= t) i++;
+  const ratio = (t - times[i]) / (times[i + 1] - times[i]);
+  return speeds[i] + ratio * (speeds[i + 1] - speeds[i]);
+}
+
+/**
+ * Reshape a curve for a late entry (slow catch / missing water).
+ *
+ * Always reshapes relative to a reference curve (Crew A) so results are
+ * deterministic regardless of drag history.
+ *
+ * As entry moves right:
+ *  - Recovery extends at the same deceleration rate → lower minimum speed
+ *  - Drive phase compresses and shifts down by the same delta
+ *  - Boat slows down more before the catch, with lower speeds throughout
+ */
+export function reshapeCurveAtEntry(refTimes, refSpeeds, newEntryPhase) {
+  const minIdx = refSpeeds.indexOf(Math.min(...refSpeeds));
+  const refEntryPhase = refTimes[minIdx];
+  const vMin = refSpeeds[minIdx];
+  const vStart = refSpeeds[0];
+
+  // Linear deceleration: extend the recovery at the same rate as the reference
+  const decelPerPhase = refEntryPhase > 0 ? (vStart - vMin) / refEntryPhase : 0;
+  const vMinNew = Math.max(vStart * 0.25, vStart - decelPerPhase * newEntryPhase);
+  const delta = vMinNew - vMin; // negative when entry is later than reference
+
+  const postOld = 1 - refEntryPhase;
+  const postNew  = 1 - newEntryPhase;
+
+  return refTimes.map(t => {
+    if (t <= newEntryPhase) {
+      // Pre-entry: stretch reference shape, scale speeds to reach vMinNew
+      const tRef = newEntryPhase > 0 ? t * refEntryPhase / newEntryPhase : 0;
+      const sRef = interpolateSpeed(refTimes, refSpeeds, tRef);
+      if (Math.abs(vMin - vStart) < 1e-6) return vStart;
+      return vStart + (sRef - vStart) * (vMinNew - vStart) / (vMin - vStart);
+    } else {
+      // Post-entry: compress drive phase, shift all speeds down by delta
+      const tRef = postNew > 0
+        ? refEntryPhase + (t - newEntryPhase) * postOld / postNew
+        : refEntryPhase;
+      return interpolateSpeed(refTimes, refSpeeds, tRef) + delta;
+    }
+  });
+}
+
+/**
  * Find the closest time index for a given time value
  */
 export function findClosestTimeIndex(times, targetTime) {

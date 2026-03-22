@@ -155,9 +155,44 @@ function findAccelerationStop(times, speeds, startIndex) {
   return acceleration.length - 1;
 }
 
+function interpolateSpeed(times, speeds, t) {
+  if (t <= times[0]) return speeds[0];
+  if (t >= times[times.length - 1]) return speeds[speeds.length - 1];
+  let i = 0;
+  while (i < times.length - 1 && times[i + 1] <= t) i++;
+  const ratio = (t - times[i]) / (times[i + 1] - times[i]);
+  return speeds[i] + ratio * (speeds[i + 1] - speeds[i]);
+}
+
+/**
+ * Fit a parabola through three points and return the vertex (x, y).
+ * Falls back to the middle point if the parabola is degenerate.
+ */
+function parabolaVertex(x0, y0, x1, y1, x2, y2) {
+  const d01 = x1 - x0, d12 = x2 - x1, d02 = x2 - x0;
+  const a = (d01 * (y2 - y1) - d12 * (y1 - y0)) / (d01 * d12 * d02);
+  if (Math.abs(a) < 1e-12) return { x: x1, y: y1 };
+  const b = (y1 - y0) / d01 - a * (x0 + x1);
+  const vx = -b / (2 * a);
+  const vy = a * vx * vx + b * vx + (y0 - a * x0 * x0 - b * x0);
+  return { x: vx, y: vy };
+}
+
+/**
+ * Linearly interpolate the zero-crossing of the acceleration array between
+ * indices i and i+1 (where accel is treated as point values at times[i]).
+ * Returns the interpolated time and the speed at that time.
+ */
+function accelZeroCrossing(times, speeds, accel, i) {
+  const t0 = times[i], a0 = accel[i];
+  const t1 = times[i + 1], a1 = accel[i + 1];
+  const t = Math.abs(a0 - a1) > 1e-12 ? t0 + (t1 - t0) * a0 / (a0 - a1) : t0;
+  return { time: t, speed: interpolateSpeed(times, speeds, t) };
+}
+
 /**
  * Derive rowing phase landmarks from speed curve
- * Phases: FULL REACH → ENTRY → OAR PERPENDICULAR → EXTRACTION → PEAK SPEED → FULL REACH
+ * Phases: FULL REACH → ENTRY → EXTRACTION → BODIES OVER → PEAK SPEED → FULL REACH
  */
 export function deriveSimpleLandmarks(times, speeds) {
   if (!times || !speeds || times.length < 2) {
@@ -165,6 +200,7 @@ export function deriveSimpleLandmarks(times, speeds) {
   }
 
   const landmarks = [];
+  const midTime = times[Math.floor(times.length / 2)];
 
   // 1. FULL REACH - at beginning
   landmarks.push({
@@ -173,46 +209,66 @@ export function deriveSimpleLandmarks(times, speeds) {
     label: 'FULL REACH'
   });
 
-  // 2. ENTRY - at minimum speed (catch)
+  // 2. ENTRY - true minimum via parabolic interpolation
   const minSpeed = Math.min(...speeds);
   const minIndex = speeds.indexOf(minSpeed);
   if (minIndex > 0) {
-    landmarks.push({
-      time: times[minIndex],
-      speed: speeds[minIndex],
-      label: 'ENTRY'
-    });
+    let entryTime = times[minIndex], entrySpeed = speeds[minIndex];
+    if (minIndex > 0 && minIndex < speeds.length - 1) {
+      const v = parabolaVertex(
+        times[minIndex - 1], speeds[minIndex - 1],
+        times[minIndex],     speeds[minIndex],
+        times[minIndex + 1], speeds[minIndex + 1]
+      );
+      if (v.x >= times[minIndex - 1] && v.x <= times[minIndex + 1]) {
+        entryTime = v.x;
+        entrySpeed = v.y;
+      }
+    }
+    landmarks.push({ time: entryTime, speed: entrySpeed, label: 'ENTRY' });
   }
 
-  // 3. OAR PERPENDICULAR - max acceleration point (before extraction)
-  const maxAccelIndex = findMaxAcceleration(times, speeds);
-  if (maxAccelIndex > minIndex && maxAccelIndex < speeds.length - 1) {
-    landmarks.push({
-      time: times[maxAccelIndex],
-      speed: speeds[maxAccelIndex],
-      label: 'OAR PERPENDICULAR'
-    });
+  // 3. EXTRACTION - zero-crossing of acceleration (pos→neg) closest to mid-stroke
+  const accel = calculateAcceleration(times, speeds);
+  const decelerationStarts = [];
+  for (let i = 0; i < accel.length - 1; i++) {
+    if (accel[i] >= 0 && accel[i + 1] < 0) {
+      decelerationStarts.push(i);
+    }
+  }
+  let extractionIndex = -1;
+  if (decelerationStarts.length > 0) {
+    extractionIndex = decelerationStarts.reduce((best, idx) =>
+      Math.abs(times[idx] - midTime) < Math.abs(times[best] - midTime) ? idx : best
+    );
+    const ext = accelZeroCrossing(times, speeds, accel, extractionIndex);
+    landmarks.push({ time: ext.time, speed: ext.speed, label: 'EXTRACTION' });
+
+    // BODIES OVER - zero-crossing of acceleration (neg→pos) after extraction
+    for (let i = extractionIndex + 1; i < accel.length - 1; i++) {
+      if (accel[i] < 0 && accel[i + 1] >= 0) {
+        const bo = accelZeroCrossing(times, speeds, accel, i);
+        landmarks.push({ time: bo.time, speed: bo.speed, label: 'BODIES OVER' });
+        break;
+      }
+    }
   }
 
-  // 4. EXTRACTION - when acceleration stops
-  const extractionIndex = findAccelerationStop(times, speeds, maxAccelIndex);
-  if (extractionIndex > maxAccelIndex && extractionIndex < speeds.length - 1) {
-    landmarks.push({
-      time: times[extractionIndex],
-      speed: speeds[extractionIndex],
-      label: 'EXTRACTION'
-    });
-  }
-
-  // 5. PEAK SPEED - at maximum speed
+  // 4. PEAK SPEED - true maximum via parabolic interpolation
   const maxSpeed = Math.max(...speeds);
   const maxIndex = speeds.indexOf(maxSpeed);
   if (maxIndex > 0 && maxIndex < speeds.length - 1) {
-    landmarks.push({
-      time: times[maxIndex],
-      speed: speeds[maxIndex],
-      label: 'PEAK SPEED'
-    });
+    let peakTime = times[maxIndex], peakSpeed = speeds[maxIndex];
+    const v = parabolaVertex(
+      times[maxIndex - 1], speeds[maxIndex - 1],
+      times[maxIndex],     speeds[maxIndex],
+      times[maxIndex + 1], speeds[maxIndex + 1]
+    );
+    if (v.x >= times[maxIndex - 1] && v.x <= times[maxIndex + 1]) {
+      peakTime = v.x;
+      peakSpeed = v.y;
+    }
+    landmarks.push({ time: peakTime, speed: peakSpeed, label: 'PEAK SPEED' });
   }
 
   return landmarks;
