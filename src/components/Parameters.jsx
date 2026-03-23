@@ -17,22 +17,14 @@ function Parameters({ params, onParamsChange }) {
       <div className="param-group">
         <label>
           Stroke Rate (strokes/min):
-          <input
-            type="number"
-            min="20"
-            max="40"
-            step="1"
+          <select
             value={params.strokeRate}
             onChange={(e) => handleChange('strokeRate', parseFloat(e.target.value))}
-          />
-          <input
-            type="range"
-            min="20"
-            max="40"
-            step="1"
-            value={params.strokeRate}
-            onChange={(e) => handleChange('strokeRate', parseFloat(e.target.value))}
-          />
+          >
+            {Array.from({ length: 21 }, (_, i) => 20 + i).map(r => (
+              <option key={r} value={r}>{r}</option>
+            ))}
+          </select>
         </label>
       </div>
 

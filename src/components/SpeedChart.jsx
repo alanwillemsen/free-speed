@@ -316,14 +316,15 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
       </div>
       <div style={{ textAlign: 'center', fontSize: '0.85rem', color: '#666', marginTop: '0.25rem' }}>
         Time (s) at&nbsp;
-        <input
-          type="number"
+        <select
           value={strokeRate}
-          min="10"
-          max="60"
-          onChange={e => { const v = parseInt(e.target.value); if (v >= 10 && v <= 60) onStrokeRateChange(v); }}
-          style={{ width: '3rem', textAlign: 'center', fontSize: '0.85rem' }}
-        />
+          onChange={e => onStrokeRateChange(parseInt(e.target.value))}
+          style={{ fontSize: '0.85rem' }}
+        >
+          {Array.from({ length: 51 }, (_, i) => 10 + i).map(r => (
+            <option key={r} value={r}>{r}</option>
+          ))}
+        </select>
         &nbsp;strokes/min&ensp;·&ensp;<span style={{ fontStyle: 'italic' }}>stroke rate only affects this scale, not efficiency</span>
       </div>
     </div>
