@@ -783,8 +783,22 @@ body {
   font-size: 0.9rem;
 }
 
-.app-footer p {
-  margin-bottom: 0.5rem;
+.footer-links {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5rem;
+}
+
+.app-footer a {
+  color: #90cdf4;
+  text-decoration: underline;
+  display: flex;
+  align-items: center;
+}
+
+.app-footer a svg {
+  display: block;
 }
 
 .app-footer strong {
