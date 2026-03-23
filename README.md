@@ -1,243 +1,70 @@
-# Dynamic Energy-Equivalence Modeling for Rowing Velocity Variation
+# Free Speed Calculator
 
-An interactive web application for analyzing intra-stroke velocity fluctuations in rowing and quantifying their energy penalties. This tool enables coaches and athletes to visualize how "boat check" (velocity variation during the stroke cycle) affects metabolic cost and race performance.
+An interactive rowing tool for visualizing how intra-stroke velocity variation costs energy — and race time.
 
-## Problem Statement
+Live at **https://free-speed.vercel.app**
 
-Standard rowing performance analysis relies on average velocity (V_avg) to compare athletes. However, due to the non-linear relationship between fluid drag and velocity—where power increases with the cube of velocity (P ∝ v³)—two rowers with identical average speeds can have vastly different metabolic costs.
+## What it does
 
-This application provides an accessible tool to:
-1. Visualize intra-stroke velocity-time curves
-2. Normalize test curves to match reference performance
-3. Quantify energy penalties from velocity fluctuations
-4. Predict equivalent finish times under same energy budgets
+Two rowers at identical average speeds can require very different amounts of energy, because drag power scales as v³. Any speed variation within a stroke forces the rower to "buy back" lost ground at exponentially higher cost.
 
-## Physics Foundation
+This tool lets you draw a boat speed profile for Rower B, automatically normalizes it to match Rower A's average speed, and shows:
+- How much extra energy Rower B's profile requires (%)
+- How much slower Rower B would finish given the same energy budget (seconds and metres)
 
-### Power-Velocity Relationship
+## Physics
+
 ```
-P(t) = k · v(t)³
-```
-Where:
-- P(t) = power required at time t
-- k = drag coefficient constant
-- v(t) = instantaneous velocity
-
-### Total Energy Calculation
-```
-E = ∫ P(t) dt = ∫ k · v(t)³ dt
+P(t) = k · v(t)³        drag power at instantaneous velocity
+E = ∫ P(t) dt           energy per stroke
+T_B = T_A × (P̄_B / P̄_A)^(1/3)   equivalent finish time
 ```
 
-### Finish Time Estimation
-When comparing two curves with the same energy budget:
-```
-T_B = T_A × (P̄_B / P̄_A)^(1/3)
-```
-
-Where:
-- T_A, T_B = finish times for curves A and B
-- P̄_A, P̄_B = average power for curves A and B
+Because v³ is convex, Jensen's inequality guarantees that any speed variation increases mean power above the minimum required to sustain that average speed. See the [math page](https://free-speed.vercel.app/math.html) for full derivations.
 
 ## Features
 
-### Core Functionality
-- **Reference Curve (Curve A)**: Loaded from measured data (`Speed Curve.xlsx`)
-- **Test Curve (Curve B)**: Interactive drawing interface for creating alternative velocity profiles
-- **Automatic Normalization**: Scales Curve B to match Curve A's average velocity
-- **Energy Analysis**: Calculates and compares total energy expenditure
-- **Finish Time Prediction**: Estimates race time impact under equal energy budgets
+- **Draw** a velocity profile by clicking and dragging on the chart
+- **Save** curves to browser localStorage with a name and description
+- **Share** curves via URL — all data is encoded in the hash fragment, no server needed
+- **Examples** — pre-loaded technique faults (Micro Pause, Slow Catch, No Ratio) to explore
 
-### Visualizations
-- Dual-curve chart with phase landmarks
-- Interactive curve editing (click and drag)
-- Real-time statistical comparison
-- Energy penalty quantification
-- Contextual insights and warnings
+## Stack
 
-## Getting Started
+- React 18 + Vite
+- Chart.js / react-chartjs-2
+- chartjs-plugin-annotation
 
-### Prerequisites
-- Node.js 18+ and npm
+## Development
 
-### Installation
 ```bash
 npm install
-```
-
-### Development
-```bash
-npm run dev
-```
-Open http://localhost:5173/ in your browser.
-
-### Build for Production
-```bash
+npm run dev        # http://localhost:5173
 npm run build
 ```
 
-## Usage Guide
+## Project structure
 
-### 1. Load Reference Data
-Curve A (reference) is automatically loaded from `Speed Curve.xlsx`. This represents actual measured boat velocity during one stroke cycle.
-
-### 2. Draw Test Curve
-Click and drag on the chart to modify Curve B. Try creating profiles with:
-- Greater velocity variation (more "boat check")
-- Smoother, steadier velocity
-- Different acceleration patterns
-
-### 3. Normalize and Compare
-Click "Normalize Curve B to Match Curve A" to scale your test curve to the same average velocity. This enables fair energy comparison.
-
-### 4. Analyze Results
-View the energy analysis to see:
-- Energy per stroke for both curves
-- Energy penalty (% increase due to variation)
-- Predicted finish time under same energy budget
-- Statistical comparison of velocity patterns
-
-## Key Insights
-
-### Why Does Variation Matter?
-Because power scales as v³, periods of high velocity cost exponentially more energy than they save during low-velocity periods. Example:
-
-**Constant velocity:** v = 5 m/s
-- Power = k × 5³ = 125k
-
-**Variable velocity:** v alternates between 4 and 6 m/s (same average: 5 m/s)
-- Average power = k × (4³ + 6³)/2 = k × (64 + 216)/2 = 140k
-- **12% more energy despite same average speed!**
-
-### Practical Applications
-- **Technique optimization**: Identify stroke patterns that minimize boat check
-- **Coaching tool**: Demonstrate energy cost of inefficient technique
-- **Performance prediction**: Estimate time savings from improved velocity profiles
-- **Athlete education**: Visual understanding of power-velocity relationship
-
-## Data Format
-
-### Reference Curve (Speed Curve.xlsx)
-The Excel file contains:
-- **Time (sec)**: Timestamps within one stroke cycle
-- **Boat Speed (m/s)**: Measured velocity at each time point
-- **Phase Landmark**: Key stroke phases (ENTRY, EXTRACTION, etc.)
-
-Sample data structure:
-```
-Time | Speed | Landmark
-4.10 | 5.10  | FULL REACH (Start)
-4.30 | 3.95  | ENTRY
-4.60 | 4.90  | OAR PERPENDICULAR
-4.85 | 5.40  | EXTRACTION
-...
-```
-
-## Technical Architecture
-
-### Stack
-- **Framework**: React 18 with Hooks
-- **Build Tool**: Vite 5
-- **Charting**: Chart.js + react-chartjs-2
-- **Data Processing**: Custom physics engine
-- **Styling**: Custom CSS with responsive design
-
-### Project Structure
 ```
 src/
 ├── components/
-│   ├── SpeedChart.jsx      # Interactive dual-curve visualization
-│   ├── Controls.jsx        # Curve manipulation and statistics
-│   └── Results.jsx         # Energy analysis and predictions
+│   ├── SpeedChart.jsx          # Interactive dual-curve chart
+│   ├── BoatVisualization.jsx   # Finish-line gap visualization
+│   ├── CurveHeader.jsx         # Name, description, save, share
+│   └── SavedCurves.jsx         # Left nav — examples + saved curves
 ├── utils/
-│   ├── physics.js          # Power/energy calculations (P=kv³)
-│   └── curves.js           # Curve normalization and manipulation
+│   ├── physics.js              # P=kv³, energy, finish-time estimate
+│   ├── curves.js               # Normalization
+│   └── landmarks.js            # Stroke phase detection
 ├── data/
-│   └── referenceCurve.json # Extracted from Speed Curve.xlsx
-├── App.jsx                 # Main application logic
-├── App.css                 # Styling
-└── main.jsx                # Entry point
+│   └── referenceCurve.json     # Reference speed profile (good technique)
+├── App.jsx
+└── App.css
+public/
+└── math.html                   # Mathematical background
 ```
-
-### Key Algorithms
-
-**Energy Integration** (Trapezoidal Rule):
-```javascript
-E = Σ [(P(t_i) + P(t_{i+1})) / 2] × Δt
-```
-
-**Curve Normalization**:
-```javascript
-v_normalized = v_original × (V̄_target / V̄_current)
-```
-
-**Finish Time Estimation**:
-```javascript
-T_B = T_A × (P̄_B / P̄_A)^(1/3)
-```
-
-## Example Scenarios
-
-### Scenario 1: Steady Rower
-- **Curve A**: Reference data (avg: 5.21 m/s, range: 2.40 m/s)
-- **Curve B**: Draw flatter curve (avg: 5.21 m/s, range: 1.50 m/s)
-- **Result**: ~5-8% energy reduction → ~2-3 seconds faster finish
-
-### Scenario 2: "Boat Check" Problem
-- **Curve A**: Reference data
-- **Curve B**: Draw exaggerated peaks and troughs (avg: 5.21 m/s, range: 3.50 m/s)
-- **Result**: ~15-25% energy penalty → ~5-8 seconds slower finish
-
-## Race Parameters
-
-Fixed for standard 2km race:
-- **Distance**: 2000 meters
-- **Reference Time**: 7:00.0 (420 seconds)
-- **Stroke Duration**: ~1.55 seconds (from data)
-- **Total Strokes**: ~270 strokes
-
-## Scientific Background
-
-This tool is based on established principles of fluid dynamics and biomechanics in rowing:
-
-1. **Drag Force**: F_drag = ½ρ C_d A v² (simplified to k·v² in our model)
-2. **Power Requirement**: P = F × v = k·v³
-3. **Energy Minimization**: For fixed average velocity, constant speed minimizes total energy
-4. **Metabolic Efficiency**: Reduced energy expenditure allows higher sustainable power output
-
-## Limitations
-
-- **Simplified drag model**: Uses k·v³ rather than full fluid dynamics
-- **No rigging effects**: Assumes identical boat/oar setup
-- **Constant stroke rate**: Doesn't model stroke rate variations
-- **Ideal conditions**: Ignores wind, waves, water temperature
-- **Single stroke analysis**: Extrapolates one stroke cycle to full race
-
-## Contributing
-
-This is an educational and analytical tool. Suggested improvements:
-- Multi-stroke analysis with fatigue modeling
-- Integration with real-time GPS/accelerometer data
-- Comparison database of elite vs. novice profiles
-- Variable stroke rate modeling
-- Wind/current compensation
-
-## License
-
-ISC
-
-## Acknowledgments
-
-- Physics model based on rowing biomechanics literature
-- Reference data from Speed Curve.xlsx (measured boat velocity)
-- Built for coaches, athletes, and sports scientists
 
 ## References
 
-For more information on rowing physics and efficiency:
-- "The Physics of Rowing" - Atkinson (1982)
-- "Rowing Biomechanics" - Kleshnev (2016)
-- "Power and Efficiency in Rowing" - Hofmijster et al. (2007)
-
----
-
-**Note**: This tool is for educational and analytical purposes. Actual race performance depends on numerous factors beyond velocity profiles including athlete fitness, technique, environmental conditions, and equipment.
+- Kleshnev, V. (2016). *The Biomechanics of Rowing*. Crowood Press.
+- Hofmijster, M. J. et al. (2007). Effect of stroke rate on the distribution of net mechanical power in rowing. *Journal of Sports Sciences*.
