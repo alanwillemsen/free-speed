@@ -1,4 +1,4 @@
-# Free Speed Calculator
+# Rowing Efficiency Calculator
 
 An interactive rowing tool for visualizing how intra-stroke velocity variation costs energy — and race time.
 

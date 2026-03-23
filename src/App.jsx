@@ -164,7 +164,7 @@ function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>Free Speed Calculator</h1>
+        <h1>Rowing Efficiency Calculator</h1>
         <p className="subtitle">
           How much time are you leaving on the water? Draw a boat speed profile and see how
           a smoother stroke — same average speed, less energy — translates to a faster finish time.
