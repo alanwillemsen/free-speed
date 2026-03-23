@@ -933,15 +933,8 @@ body {
 }
 
 @media (max-width: 900px) {
-  .app-content {
-    flex-direction: column;
-  }
-
   .left-nav {
-    flex: none;
-    border-right: none;
-    border-bottom: 1px solid #e2e8f0;
-    max-height: 280px;
+    flex: 0 0 200px;
   }
 
   .main-content {
@@ -951,6 +944,10 @@ body {
 }
 
 @media (max-width: 768px) {
+  .left-nav {
+    flex: 0 0 160px;
+  }
+
   .app-header h1 {
     font-size: 1.6rem;
   }
