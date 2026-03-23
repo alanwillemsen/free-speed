@@ -61,7 +61,7 @@ function Results({ curveA, curveBNormalized, raceTime, onRaceTimeChange, finishT
 
       <div className="results-grid">
         <div className="result-section prediction">
-          <h3>Crew A (Reference)</h3>
+          <h3>Rower A (Good Technique)</h3>
           <div className="metric">
             <span className="metric-label">2km Finish Time:</span>
             <input
@@ -76,9 +76,9 @@ function Results({ curveA, curveBNormalized, raceTime, onRaceTimeChange, finishT
         </div>
 
         <div className="result-section prediction">
-          <h3>Crew B — Equivalent Finish Time</h3>
+          <h3>Rower B — Equivalent Finish Time</h3>
           <p className="explanation">
-            Same energy budget as Crew A, using Crew B's velocity profile:
+            Same energy budget as Rower A, using Rower B's velocity profile:
           </p>
           <div className="metric highlight">
             <span className="metric-label">Estimated Finish Time:</span>

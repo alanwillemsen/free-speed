@@ -229,8 +229,44 @@
   Only after normalisation is \(\bar{P}_B\) computed for the finish-time estimate.
 </p>
 
+<!-- ─── Stroke rate ────────────────────────────────────────────────── -->
+<h2>7. Stroke Rate and Power-Velocity Efficiency</h2>
+
+<p>
+  Stroke rate is an important variable in rowing — higher rates affect muscle
+  recruitment, blade mechanics, and pacing strategy. However, stroke rate has
+  <em>no effect</em> on power-velocity efficiency as modelled here, provided the
+  <em>shape</em> of the velocity curve (the pattern of acceleration and deceleration
+  expressed as a function of normalised stroke phase \(\phi\)) remains the same.
+</p>
+
+<p>
+  To see why, note that the mean power integral (Section 3) is taken over the
+  normalised phase \(\phi \in [0,1]\), which stretches or compresses time to fill
+  exactly one stroke regardless of how long that stroke lasts:
+</p>
+
+<div class="eq-block">
+  $$ \bar{P} = k \int_0^{1} v(\phi)^3 \, d\phi $$
+</div>
+
+<p>
+  The stroke duration \(\tau = 60 / r\) does not appear in this expression.
+  Changing the rate while keeping the normalised shape identical simply rescales
+  the time axis uniformly, leaving the phase-domain integral — and therefore
+  \(\bar{P}\) and the finish-time estimate — unchanged.
+</p>
+
+<div class="note">
+  <strong>Implication:</strong> What matters to efficiency is the <em>shape</em> of
+  the velocity fluctuation within a stroke — how smoothly speed is maintained — not
+  how quickly the stroke cycle repeats. Two crews rowing at different rates but with
+  identical normalised velocity profiles will incur the same energy penalty relative
+  to steady-state propulsion.
+</div>
+
 <!-- ─── Energy penalty ─────────────────────────────────────────────── -->
-<h2>7. Energy Penalty</h2>
+<h2>8. Energy Penalty</h2>
 
 <p>
   The energy penalty quantifies how much extra energy Crew B expends relative to
@@ -248,7 +284,7 @@
 </p>
 
 <!-- ─── Stroke phases ──────────────────────────────────────────────── -->
-<h2>8. Stroke Phase Landmarks</h2>
+<h2>9. Stroke Phase Landmarks</h2>
 
 <p>
   The phase axis \(\phi \in [0, 1]\) is divided into biomechanical phases detected
@@ -289,7 +325,7 @@
 </table>
 
 <!-- ─── Constants ──────────────────────────────────────────────────── -->
-<h2>9. Implementation Constants</h2>
+<h2>10. Implementation Constants</h2>
 
 <table>
   <thead>

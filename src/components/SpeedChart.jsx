@@ -25,7 +25,7 @@ ChartJS.register(
   annotationPlugin
 );
 
-function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landmarksB, energyPenaltyPercent, strokeRate, onStrokeRateChange }) {
+function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landmarksB, energyPenaltyPercent, strokeRate, onStrokeRateChange, isNewCurve }) {
   const chartRef = useRef(null);
   const [isDrawing, setIsDrawing] = useState(false);
 
@@ -65,7 +65,7 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
     });
   }
 
-  // Crew B landmark annotations
+  // Rower B landmark annotations
   if (landmarksB && landmarksB.length > 0) {
     landmarksB.forEach((landmark, idx) => {
       landmarkAnnotations[`landmarkB_${idx}`] = {
@@ -92,7 +92,7 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
     });
   }
 
-  // Phase duration labels for each crew
+  // Phase duration labels for each rower
   const findLm = (lms, label) => lms?.find(l => l.label === label);
 
   const addPhaseLabels = (lms, prefix, yRow, bgColor) => {
@@ -135,7 +135,7 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
   const data = {
     datasets: [
       {
-        label: 'Crew A (Reference)',
+        label: 'Rower A (Good Technique)',
         data: dataA,
         borderColor: 'rgba(75, 192, 192, 1)',
         backgroundColor: 'rgba(75, 192, 192, 0.1)',
@@ -146,7 +146,7 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
         fill: false,
       },
       {
-        label: 'Crew B',
+        label: 'Rower B',
         data: dataB,
         borderColor: 'rgba(255, 99, 132, 1)',
         backgroundColor: 'rgba(255, 99, 132, 0.1)',
@@ -178,7 +178,7 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
           generateLabels: (chart) => {
             const labels = ChartJS.defaults.plugins.legend.labels.generateLabels(chart);
             labels.forEach(label => {
-              if (label.text === 'Crew A (Reference)') {
+              if (label.text === 'Rower A (Good Technique)') {
                 label.lineDash = [5, 5];
               }
             });
@@ -188,7 +188,7 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
       },
       title: {
         display: true,
-        text: 'Speed Curves',
+        text: 'Per-stroke speed profile',
         font: {
           size: 18,
           weight: 'bold'
@@ -207,12 +207,7 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
         min: 0,
         max: strokeDuration,
         title: {
-          display: true,
-          text: `Time (s) at ${strokeRate} strokes/min`,
-          font: {
-            size: 14,
-            weight: 'bold'
-          }
+          display: false,
         },
         ticks: {
           maxTicksLimit: 10,
@@ -252,6 +247,9 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
 
     const xScale = chart.scales.x;
     const yScale = chart.scales.y;
+
+    // Ignore clicks outside the plot area
+    if (x < xScale.left || x > xScale.right || y < yScale.top || y > yScale.bottom) return;
 
     const xValue = xScale.getValueForPixel(x);
     const yValue = yScale.getValueForPixel(y);
@@ -306,25 +304,27 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
 
   return (
     <div className="chart-container">
-      <div className="chart-instructions">
-        <strong>Draw Crew B:</strong> Click and drag to draw a velocity profile. It will be scaled to match Crew A's average speed —
-        currently requiring <strong>{energyPenaltyPercent > 0 ? '+' : ''}{(Math.round(energyPenaltyPercent * 10) / 10 || 0).toFixed(1)}% energy</strong> to maintain the same pace.
-        <button className="btn btn-secondary" style={{ marginLeft: '1rem' }} onClick={onReset}>Reset</button>
-        <label style={{ marginLeft: '1.5rem', fontSize: '0.9rem' }}>
-          Stroke rate:&nbsp;
-          <input
-            type="number"
-            value={strokeRate}
-            min="10"
-            max="60"
-            onChange={e => { const v = parseInt(e.target.value); if (v >= 10 && v <= 60) onStrokeRateChange(v); }}
-            style={{ width: '3.5rem', textAlign: 'center' }}
-          />
-          &nbsp;spm
-        </label>
-      </div>
+      {isNewCurve && (
+        <div className="chart-instructions">
+          <strong>Draw Rower B:</strong> Click and drag to draw a velocity profile. It will be scaled to match Rower A's average speed —
+          currently requiring <strong>{energyPenaltyPercent > 0 ? '+' : ''}{(Math.round(energyPenaltyPercent * 10) / 10 || 0).toFixed(1)}% energy</strong> to maintain the same pace.
+          <button className="btn btn-secondary" style={{ marginLeft: '1rem' }} onClick={onReset}>Reset</button>
+        </div>
+      )}
       <div className="chart-wrapper">
         <Line key={strokeRate} ref={chartRef} data={data} options={options} />
+      </div>
+      <div style={{ textAlign: 'center', fontSize: '0.85rem', color: '#666', marginTop: '0.25rem' }}>
+        Time (s) at&nbsp;
+        <input
+          type="number"
+          value={strokeRate}
+          min="10"
+          max="60"
+          onChange={e => { const v = parseInt(e.target.value); if (v >= 10 && v <= 60) onStrokeRateChange(v); }}
+          style={{ width: '3rem', textAlign: 'center', fontSize: '0.85rem' }}
+        />
+        &nbsp;strokes/min&ensp;·&ensp;<span style={{ fontStyle: 'italic' }}>stroke rate only affects this scale, not efficiency</span>
       </div>
     </div>
   );

@@ -4,7 +4,7 @@ function Controls({ onReset }) {
       <h2>Curve Controls</h2>
       <div className="control-buttons">
         <button className="btn btn-secondary" onClick={onReset}>
-          Reset Crew B
+          Reset Rower B
         </button>
       </div>
     </div>

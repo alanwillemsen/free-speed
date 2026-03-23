@@ -24,7 +24,7 @@ function formatTimeDiff(seconds) {
 function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeChange, energyPenaltyPercent, estimatedFinishTime }) {
   const [inputValue, setInputValue] = useState(formatTime(raceTime));
 
-  const boatLength = 17.4;
+  const boatLength = 8;
   const raceDistance = 2000;
 
   const distanceDifference = Math.abs(avgVelocityA * timeDifference);
@@ -69,7 +69,7 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
 
       <div className="race-metrics">
         <div className="race-metric">
-          <span className="race-metric-label">Crew A finish time:</span>
+          <span className="race-metric-label">Rower A finish time:</span>
           <input
             className="time-input"
             value={inputValue}
@@ -80,7 +80,7 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
           />
         </div>
         <div className="race-metric">
-          <span className="race-metric-label">Crew B equivalent:</span>
+          <span className="race-metric-label">Rower B equivalent:</span>
           <span className={`race-metric-value ${isWorse ? 'worse' : absDifference < 0.1 ? '' : 'better'}`}>
             {formatTime(estimatedFinishTime)}
           </span>
@@ -102,7 +102,7 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
       <p className="viz-description">
         {absDifference < 0.1
           ? 'Both velocity profiles require the same energy — boats finish together.'
-          : <>If both rowers expend the same total energy, {isCurveBFaster ? 'Crew B finishes ahead' : 'Crew A finishes ahead'} by <span className="distance-diff">{absDifference.toFixed(1)}m</span>.</>
+          : <>If both rowers expend the same total energy, {isCurveBFaster ? 'Rower B finishes ahead' : 'Rower A finishes ahead'} by <span className="distance-diff">{absDifference.toFixed(1)}m</span>.</>
         }
       </p>
 
@@ -126,14 +126,14 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
         <g>
           <rect x={boatAPosition - boatLengthPx} y={trackY + 10} width={boatLengthPx} height={boatHeight} fill="rgba(75, 192, 192, 0.9)" stroke="rgba(75, 192, 192, 1)" strokeWidth="2" rx="3" />
           <polygon points={`${boatAPosition},${trackY + 10 + boatHeight / 2} ${boatAPosition - 10},${trackY + 10} ${boatAPosition - 10},${trackY + 10 + boatHeight}`} fill="rgba(75, 192, 192, 0.9)" stroke="rgba(75, 192, 192, 1)" strokeWidth="2" />
-          <text x={boatAPosition - boatLengthPx / 2} y={trackY + 20 + boatHeight / 2} fontSize="11" fontWeight="bold" fill="white" textAnchor="middle">Crew A</text>
+          <text x={boatAPosition - boatLengthPx / 2} y={trackY + 20 + boatHeight / 2} fontSize="11" fontWeight="bold" fill="white" textAnchor="middle">Rower A</text>
         </g>
 
         {/* Boat B */}
         <g>
           <rect x={boatBPosition - boatLengthPx} y={trackY + 30} width={boatLengthPx} height={boatHeight} fill="rgba(255, 99, 132, 0.9)" stroke="rgba(255, 99, 132, 1)" strokeWidth="2" rx="3" />
           <polygon points={`${boatBPosition},${trackY + 30 + boatHeight / 2} ${boatBPosition - 10},${trackY + 30} ${boatBPosition - 10},${trackY + 30 + boatHeight}`} fill="rgba(255, 99, 132, 0.9)" stroke="rgba(255, 99, 132, 1)" strokeWidth="2" />
-          <text x={boatBPosition - boatLengthPx / 2} y={trackY + 40 + boatHeight / 2} fontSize="11" fontWeight="bold" fill="white" textAnchor="middle">Crew B</text>
+          <text x={boatBPosition - boatLengthPx / 2} y={trackY + 40 + boatHeight / 2} fontSize="11" fontWeight="bold" fill="white" textAnchor="middle">Rower B</text>
         </g>
 
         {absDifference > 1 && (
@@ -151,8 +151,8 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
       </svg>
 
       {absDifference < 0.1 && <p className="viz-note">≈ Curves have similar efficiency profiles.</p>}
-      {absDifference >= 0.1 && isCurveBFaster && <p className="viz-note success">✓ Crew B is more efficient and would finish ahead!</p>}
-      {absDifference >= 0.1 && !isCurveBFaster && <p className="viz-note warning">⚠ Crew B is less efficient and would finish behind.</p>}
+      {absDifference >= 0.1 && isCurveBFaster && <p className="viz-note success">✓ Rower B is more efficient and would finish ahead!</p>}
+      {absDifference >= 0.1 && !isCurveBFaster && <p className="viz-note warning">⚠ Rower B is less efficient and would finish behind.</p>}
     </div>
   );
 }

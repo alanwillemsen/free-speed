@@ -1,12 +1,15 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import SpeedChart from './components/SpeedChart';
 import BoatVisualization from './components/BoatVisualization';
+import SavedCurves, { parseShareHash, EXAMPLE_CURVES } from './components/SavedCurves';
+import CurveHeader from './components/CurveHeader';
 import { normalizeCurve } from './utils/curves';
 import { deriveSimpleLandmarks } from './utils/landmarks';
 import { calculateEnergy, calculateAveragePower, estimateFinishTime, calculateEnergyPenalty } from './utils/physics';
 import referenceCurveData from './data/referenceCurve.json';
 import './App.css';
 
+const STORAGE_KEY = 'freespeed_curves';
 const RAW_AVG_SPEED = referenceCurveData.speeds.reduce((a, b) => a + b, 0) / referenceCurveData.speeds.length;
 const RACE_DISTANCE = 2000;
 
@@ -20,13 +23,15 @@ function App() {
     deriveSimpleLandmarks(referenceCurveData.times, referenceCurveData.speeds)
   );
 
-  // User-entered finish time for Curve A (seconds), default 6:30
-  const [raceTime, setRaceTime] = useState(390);
+  const sharedOnLoad = (() => {
+    try { return parseShareHash(); } catch { return null; }
+  })();
 
-  // Stroke rate for x-axis display (strokes per minute), default 36
-  const [strokeRate, setStrokeRate] = useState(36);
+  const defaultEntry = sharedOnLoad ?? EXAMPLE_CURVES[0];
 
-  // Scale Curve A's shape to match the target average speed
+  const [raceTime, setRaceTime] = useState(defaultEntry?.raceTime ?? 450);
+  const [strokeRate, setStrokeRate] = useState(defaultEntry?.strokeRate ?? 36);
+
   const targetAvgSpeed = RACE_DISTANCE / raceTime;
   const speedScale = targetAvgSpeed / RAW_AVG_SPEED;
   const curveA = {
@@ -34,9 +39,11 @@ function App() {
     speeds: curveARaw.speeds.map(s => s * speedScale),
   };
 
-  const [curveB, setCurveB] = useState({
-    times: [...referenceCurveData.times],
-    speeds: curveARaw.speeds.map(s => s * speedScale),
+  const [curveB, setCurveB] = useState(() => {
+    if (defaultEntry?.speeds?.length === referenceCurveData.times.length) {
+      return { times: [...referenceCurveData.times], speeds: defaultEntry.speeds };
+    }
+    return { times: [...referenceCurveData.times], speeds: curveARaw.speeds.map(s => s * speedScale) };
   });
 
   const [curveBNormalized, setCurveBNormalized] = useState({
@@ -44,23 +51,108 @@ function App() {
     speeds: curveARaw.speeds.map(s => s * speedScale),
   });
 
-  // Re-normalize Curve B whenever curveB or raceTime changes
+  // null = creating a new curve; entry object = viewing a saved/example curve
+  const [viewingCurve, setViewingCurve] = useState(sharedOnLoad ?? EXAMPLE_CURVES[0]);
+
+  // Once the user navigates (loads a curve or creates a new one), stop seeding
+  // the header from the shared URL so that "New curve" gives a blank header.
+  const sharedConsumed = useRef(false);
+
+  // true when a new curve has unsaved changes (drawn or title/desc edited)
+  const [isDirty, setIsDirty] = useState(false);
+
+  // incremented after saving a new curve so SavedCurves re-reads localStorage
+  const [refreshKey, setRefreshKey] = useState(0);
+
   useEffect(() => {
     const normalizedSpeeds = normalizeCurve(curveB.speeds, targetAvgSpeed);
     setCurveBNormalized({ times: curveB.times, speeds: normalizedSpeeds });
   }, [curveB, raceTime]);
 
+  const confirmDiscard = () =>
+    !isDirty || window.confirm('You have unsaved changes. Discard them?');
 
   const handleCurveBChange = (newSpeeds) => {
     const correctedSpeeds = [...newSpeeds];
     correctedSpeeds[correctedSpeeds.length - 1] = correctedSpeeds[0];
     setCurveB({ times: curveB.times, speeds: correctedSpeeds });
+    setIsDirty(true);
   };
 
   const handleReset = () => {
     setCurveB({ times: [...curveA.times], speeds: [...curveA.speeds] });
   };
 
+  const handleLoadCurve = (entry) => {
+    if (isDirty && !confirmDiscard()) return;
+    sharedConsumed.current = true;
+    if (entry.raceTime) setRaceTime(entry.raceTime);
+    if (entry.strokeRate) setStrokeRate(entry.strokeRate);
+    setCurveB({ times: [...referenceCurveData.times], speeds: entry.speeds });
+    setViewingCurve(entry);
+    setIsDirty(false);
+  };
+
+  const handleNewCurve = () => {
+    if (isDirty && !confirmDiscard()) return;
+    sharedConsumed.current = true;
+    setViewingCurve(null);
+    setIsDirty(false);
+    handleReset();
+  };
+
+  const handleSave = (name, desc) => {
+    if (!viewingCurve || viewingCurve.isExample) {
+      // Save as a new entry (also covers: saving a modified example as a new curve)
+      const resolvedName = (name || 'Untitled') === (viewingCurve?.name ?? '')
+        ? `${name} (copy)`
+        : (name || 'Untitled');
+      const entry = {
+        id: Date.now(),
+        name: resolvedName,
+        desc,
+        speeds: curveB.speeds,
+        raceTime,
+        strokeRate,
+        savedAt: new Date().toISOString(),
+      };
+      const existing = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+      localStorage.setItem(STORAGE_KEY, JSON.stringify([entry, ...existing]));
+      setViewingCurve(entry);
+    } else {
+      // Update existing saved entry
+      const updated = { ...viewingCurve, speeds: curveB.speeds, raceTime, strokeRate };
+      const existing = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(existing.map(e => e.id === updated.id ? updated : e)));
+      setViewingCurve(updated);
+    }
+    setIsDirty(false);
+    setRefreshKey(k => k + 1);
+  };
+
+  const handleUpdateCurve = (updatedEntry) => {
+    if (updatedEntry.isExample) return; // examples are read-only in storage
+    setViewingCurve(updatedEntry);
+    const existing = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    const next = existing.map(e => e.id === updatedEntry.id ? updatedEntry : e);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    setRefreshKey(k => k + 1);
+  };
+
+  const handleDuplicateExample = (entry) => {
+    const copy = {
+      id: Date.now(),
+      name: entry.name,
+      desc: entry.desc,
+      speeds: entry.speeds,
+      raceTime: entry.raceTime,
+      strokeRate: entry.strokeRate,
+      savedAt: new Date().toISOString(),
+    };
+    const existing = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    localStorage.setItem(STORAGE_KEY, JSON.stringify([copy, ...existing]));
+    setRefreshKey(k => k + 1);
+  };
 
   const avgPowerA = calculateAveragePower(curveA.times, curveA.speeds);
   const avgPowerBNorm = calculateAveragePower(curveBNormalized.times, curveBNormalized.speeds);
@@ -80,7 +172,27 @@ function App() {
       </header>
 
       <div className="app-content">
+        <SavedCurves
+          onLoad={handleLoadCurve}
+          onNew={handleNewCurve}
+          onDuplicate={handleDuplicateExample}
+          viewingCurveId={viewingCurve?.id}
+          refreshKey={refreshKey}
+        />
+
         <div className="main-content">
+          <CurveHeader
+            key={viewingCurve?.id ?? 'new'}
+            entry={viewingCurve}
+            isNew={!viewingCurve}
+            isDirty={isDirty}
+            initialName={!sharedConsumed.current ? sharedOnLoad?.name : undefined}
+            initialDesc={!sharedConsumed.current ? sharedOnLoad?.desc : undefined}
+            onSave={handleSave}
+            onUpdate={handleUpdateCurve}
+            onDirty={() => setIsDirty(true)}
+          />
+
           <SpeedChart
             curveA={curveA}
             curveB={curveBNormalized}
@@ -91,6 +203,7 @@ function App() {
             energyPenaltyPercent={penalty.percentPenalty}
             strokeRate={strokeRate}
             onStrokeRateChange={setStrokeRate}
+            isNewCurve={!viewingCurve}
           />
 
           <BoatVisualization
