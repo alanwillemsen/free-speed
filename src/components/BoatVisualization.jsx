@@ -106,7 +106,7 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
         }
       </p>
 
-      <svg width={svgWidth} height={svgHeight} className="boat-svg">
+      <svg viewBox={`0 0 ${svgWidth} ${svgHeight}`} width="100%" className="boat-svg">
         <rect x="0" y={trackY} width={svgWidth} height={trackHeight} fill="#E3F2FD" stroke="#90CAF9" strokeWidth="1" />
 
         <line x1={finishLineX} y1={trackY} x2={finishLineX} y2={trackY + trackHeight} stroke="#FF5722" strokeWidth="4" strokeDasharray="5,5" />
