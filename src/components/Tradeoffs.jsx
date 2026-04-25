@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 
-const STROKE = ['speed', 'effort', 'rate', 'handLength'];
+const STROKE = ['speed', 'effort', 'rate', 'handLength', 'ratio'];
 const RIGGING = ['outboard', 'inboard', 'span'];
 const ALL = [...STROKE, ...RIGGING];
 
@@ -8,6 +8,7 @@ const LABELS = {
   speed: 'Boat speed',
   rate: 'Stroke rate',
   handLength: 'Drive length (hands)',
+  ratio: 'Ratio (recovery / drive)',
   effort: 'Effort (energy spent)',
   outboard: 'Oar outboard',
   inboard: 'Oar inboard',
@@ -19,6 +20,7 @@ const DESCRIPTIONS = {
   speed: 'How fast the boat travels.',
   rate: 'Strokes per minute.',
   handLength: 'How far the rower pulls the handle on each stroke.',
+  ratio: 'How long the recovery is relative to the drive — higher = smoother run between strokes.',
   effort: 'Energy the rower spends per stroke.',
   outboard: 'Pin to blade tip — longer = heavier gearing, longer blade arc.',
   inboard: 'Handle to pin — longer = lighter gearing, shorter blade arc.',
@@ -27,17 +29,22 @@ const DESCRIPTIONS = {
 };
 
 // Two abstract relationships govern the system:
-//   E1 (kinematic):  speed ∝ rate × bladeLength
+//   E1 (kinematic):  speed ∝ rate × bladeLength × √ratio
 //                    bladeLength ≡ handLength × outboard / (inboard × span)
 //   E2 (cost):       effort ∝ speed³
+//
+// The √ratio keeps the locked-case physics right: at fixed everything else,
+// raising rate forces ratio to drop (recovery time can't grow when the
+// period shrinks). Trade-off: in the unconstrained "raise effort" case the
+// model puts a small ratio↑ rather than the racing-intuition ratio↓.
 //
 // Each row encodes the coefficient of log(value) such that
 // Σ coeff_i × log(v_i) stays constant when valid moves are made.
 const A_ROWS = [
-  // E1:  log(speed) − log(rate) − log(handLength) − log(outboard) + log(inboard) + log(span) = const
-  { speed: +1, rate: -1, handLength: -1, effort:  0, outboard: -1, inboard: +1, span: +1 },
+  // E1:  log(speed) − log(rate) − log(handLength) − log(outboard) + log(inboard) + log(span) − ½·log(ratio) = const
+  { speed: +1, rate: -1, handLength: -1, ratio: -0.5, effort:  0, outboard: -1, inboard: +1, span: +1 },
   // E2:  log(effort) − 3·log(speed) = const
-  { speed: -3, rate:  0, handLength:  0, effort: +1, outboard:  0, inboard:  0, span:  0 },
+  { speed: -3, rate:  0, handLength:  0, ratio:  0,   effort: +1, outboard:  0, inboard:  0, span:  0 },
 ];
 
 // Derived display only — never directly moved by the user, never locked.
@@ -151,7 +158,7 @@ export default function Tradeoffs({ onBack }) {
         r = apply([0, 1], [...strokeAbsorbers, ...riggingAbsorbers]);
         if (r) return r;
       }
-      if (!isRigging && locked.rate && locked.handLength) {
+      if (!isRigging && locked.rate && locked.handLength && locked.ratio) {
         r = apply([1], strokeAbsorbers);
         if (r) return r;
       }
@@ -188,11 +195,15 @@ export default function Tradeoffs({ onBack }) {
       <header className="tradeoffs-header">
         <button className="btn" onClick={onBack}>← Back</button>
         <h1>Tradeoffs</h1>
+        <button className="btn" onClick={reset}>Reset</button>
       </header>
 
       <div className="tradeoffs-body">
         <p className="tradeoffs-intro">
           Lock the variables you want to hold constant. Move a slider to see what gives.
+          Assumes values stay in a reasonable range — at extremes, real-world efficiency
+          losses (slip, hull-speed spikes, technique breakdown) start to dominate and
+          aren't modeled here.
         </p>
 
         <div className="tradeoffs-grid">
@@ -232,12 +243,6 @@ export default function Tradeoffs({ onBack }) {
           </div>
         </div>
 
-        <div className="tradeoffs-footer">
-          <code className="tradeoffs-eq-inline">
-            blade = hand × outboard / (inboard × span)  ·  speed ∝ rate × blade  ·  effort ∝ speed³
-          </code>
-          <button className="btn btn-secondary btn-sm" onClick={reset}>Reset</button>
-        </div>
       </div>
     </div>
   );
