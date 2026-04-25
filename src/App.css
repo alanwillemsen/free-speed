@@ -962,11 +962,10 @@ body {
 
 /* Tradeoffs Page */
 .tradeoffs-page {
-  height: 100vh;
+  min-height: 100vh;
   display: flex;
   flex-direction: column;
   background: #f5f7fa;
-  overflow: hidden;
 }
 
 .tradeoffs-header {
