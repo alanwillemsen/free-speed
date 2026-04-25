@@ -125,8 +125,32 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
     });
   };
 
-  addPhaseLabels(landmarks,  'A', 2.7,  'rgba(75, 192, 192, 0.85)');
-  addPhaseLabels(landmarksB, 'B', 7.3,  'rgba(255, 99, 132, 0.85)');
+  // Compute Y-axis bounds from actual data with padding
+  const allSpeeds = [...speedsA, ...speedsB];
+  const dataMin = Math.min(...allSpeeds);
+  const dataMax = Math.max(...allSpeeds);
+  const padding = (dataMax - dataMin) * 0.15;
+  const yMin = Math.floor((dataMin - padding) * 2) / 2; // round down to nearest 0.5
+  const yMax = Math.ceil((dataMax + padding) * 2) / 2;  // round up to nearest 0.5
+
+  // Position phase labels near the bottom and top of the chart
+  const labelYA = yMin + (yMax - yMin) * 0.08;
+  const labelYB = yMax - (yMax - yMin) * 0.08;
+
+  addPhaseLabels(landmarks,  'A', labelYA, 'rgba(75, 192, 192, 0.85)');
+  addPhaseLabels(landmarksB, 'B', labelYB, 'rgba(255, 99, 132, 0.85)');
+
+  // Average speed horizontal line (same for both curves after normalization)
+  const avgSpeed = speedsA.reduce((a, b) => a + b, 0) / speedsA.length;
+
+  landmarkAnnotations['avgSpeed'] = {
+    type: 'line',
+    yMin: avgSpeed,
+    yMax: avgSpeed,
+    borderColor: 'rgba(100, 100, 100, 0.4)',
+    borderWidth: 1.5,
+    borderDash: [8, 4],
+  };
 
   // Create data arrays with x,y coordinates using time in seconds
   const dataA = speedsA.map((speed, i) => ({ x: timesA_s[i], y: speed }));
@@ -135,7 +159,7 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
   const data = {
     datasets: [
       {
-        label: 'Rower A (Good Technique)',
+        label: 'Your potential',
         data: dataA,
         borderColor: 'rgba(75, 192, 192, 1)',
         backgroundColor: 'rgba(75, 192, 192, 0.1)',
@@ -146,7 +170,7 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
         fill: false,
       },
       {
-        label: 'Rower B',
+        label: 'You now',
         data: dataB,
         borderColor: 'rgba(255, 99, 132, 1)',
         backgroundColor: 'rgba(255, 99, 132, 0.1)',
@@ -178,7 +202,7 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
           generateLabels: (chart) => {
             const labels = ChartJS.defaults.plugins.legend.labels.generateLabels(chart);
             labels.forEach(label => {
-              if (label.text === 'Rower A (Good Technique)') {
+              if (label.text === 'Your potential') {
                 label.lineDash = [5, 5];
               }
             });
@@ -226,8 +250,8 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
             weight: 'bold'
           }
         },
-        min: 2,
-        max: 8,
+        min: yMin,
+        max: yMax,
         ticks: {
           font: {
             size: 11
@@ -306,7 +330,7 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
     <div className="chart-container">
       {isNewCurve && (
         <div className="chart-instructions">
-          <strong>Draw Rower B:</strong> Click and drag to draw a velocity profile. It will be scaled to match Rower A's average speed —
+          <strong>Draw your stroke:</strong> Click and drag to draw a velocity profile. It will be scaled to match your potential average speed —
           currently requiring <strong>{energyPenaltyPercent > 0 ? '+' : ''}{(Math.round(energyPenaltyPercent * 10) / 10 || 0).toFixed(1)}% energy</strong> to maintain the same pace.
           <button className="btn btn-secondary" style={{ marginLeft: '1rem' }} onClick={onReset}>Reset</button>
         </div>

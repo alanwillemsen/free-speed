@@ -21,26 +21,83 @@ function formatTimeDiff(seconds) {
   return `${sign}${seconds.toFixed(1)}s`;
 }
 
+// Rower icon from /public/rower.svg (1371 × 360 native).
+// The hull occupies roughly the middle portion of the image; oars extend beyond.
+// bowX = bow tip position, hullLen = hull length in px, cy = vertical centre, tint = CSS color.
+// We scale the full image so that the hull portion matches hullLen, preserving aspect ratio.
+const ICON_W = 1371;
+const ICON_H = 360;
+const ICON_ASPECT = ICON_W / ICON_H; // ≈ 3.81
+// Measured from the actual SVG path coordinates:
+// Hull stern ≈ x=210 (0.153), hull bow tip ≈ x=1336 (0.975)
+const hullStartFraction = 0.153;
+const hullEndFraction = 0.975;
+const hullFraction = hullEndFraction - hullStartFraction; // 0.822
+
+function RowerIcon({ bowX, hullLen, cy, tint }) {
+  // Hull waterline sits at ≈ y=260 (0.722 of image height)
+  const waterlineFraction = 0.722;
+
+  const iconW = hullLen / hullFraction;
+  const iconH = iconW / ICON_ASPECT;
+
+  // Position so the bow tip aligns with bowX, and waterline aligns with cy
+  const iconX = bowX - hullEndFraction * iconW;
+  const iconY = cy - waterlineFraction * iconH;
+
+  return (
+    <image
+      href="/rower.svg"
+      x={iconX}
+      y={iconY}
+      width={iconW}
+      height={iconH}
+      preserveAspectRatio="xMidYMid meet"
+      style={{ filter: tint ? `drop-shadow(0 0 0 ${tint})` : undefined, opacity: 0.85 }}
+    />
+  );
+}
+
 function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeChange, energyPenaltyPercent, estimatedFinishTime }) {
   const [inputValue, setInputValue] = useState(formatTime(raceTime));
 
-  const boatLength = 8;
+  const boatLength = 8.2; // racing single (1x) length in metres
   const raceDistance = 2000;
 
   const distanceDifference = Math.abs(avgVelocityA * timeDifference);
   const isCurveBFaster = timeDifference < 0;
 
   const svgWidth = 800;
-  const svgHeight = 200;
-  const trackHeight = 60;
-  const trackY = (svgHeight - trackHeight) / 2;
-  const visibleDistance = 100;
-  const scale = svgWidth / visibleDistance;
-  const boatLengthPx = boatLength * scale;
-  const boatHeight = 20;
+  const svgHeight = 180;
+  const trackHeight = 70;
+  const trackY = 15;
+  const boatAY = trackY + 18; // vertical center of boat A
+  const boatBY = trackY + trackHeight - 18; // vertical center of boat B
+  const buoyY = trackY + trackHeight / 2;
 
-  const finishLineX = svgWidth - 60;
-  const winnerPosition = finishLineX;
+  const finishLineX = svgWidth - 50;
+  const minVisibleDistance = 100;
+  // The trailing boat needs room for: hull + oar overhang + label text + gap.
+  // Label "Rower B" is ~55px at fontSize 11 in an 800px-wide SVG.
+  // We solve: finishLineX - distDiff * scale - hullLen * scale - oarOverhang - labelPx - gap > 0
+  // oar overhang = (hullStartFraction / hullFraction) * hullLen * scale ≈ 0.186 * hullLen * scale
+  // Rearranging for scale: scale < finishLineX / (distDiff + hullLen * 1.186 + labelMetres)
+  const oarFactor = 1 + hullStartFraction / hullFraction; // ≈ 1.186
+  const labelPx = 70; // pixels needed for label text + gap
+  // We need: loserBowX - hullLen*scale*oarFactor - labelPx > 0
+  // loserBowX = finishLineX - distDiff * scale
+  // So: finishLineX - distDiff*scale - hullLen*scale*oarFactor - labelPx > 0
+  // scale * (distDiff + hullLen*oarFactor) < finishLineX - labelPx
+  const maxScale = distanceDifference > 0
+    ? (finishLineX - labelPx) / (distanceDifference + boatLength * oarFactor)
+    : Infinity;
+  const minScale = svgWidth / 1000; // don't zoom out beyond 1000m visible
+  const defaultScale = svgWidth / Math.max(minVisibleDistance, distanceDifference + boatLength * oarFactor + 25);
+  const scale = Math.max(minScale, Math.min(defaultScale, maxScale));
+  const visibleDistance = svgWidth / scale;
+  const boatLengthPx = boatLength * scale;
+
+  const winnerPosition = finishLineX; // bow tip at finish
   const loserPosition = finishLineX - (distanceDifference * scale);
 
   const boatAPosition = isCurveBFaster ? loserPosition : winnerPosition;
@@ -69,7 +126,7 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
 
       <div className="race-metrics">
         <div className="race-metric">
-          <span className="race-metric-label">Rower A finish time:</span>
+          <span className="race-metric-label">Your potential finish time:</span>
           <input
             className="time-input"
             value={inputValue}
@@ -80,7 +137,7 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
           />
         </div>
         <div className="race-metric">
-          <span className="race-metric-label">Rower B equivalent:</span>
+          <span className="race-metric-label">You now:</span>
           <span className={`race-metric-value ${isWorse ? 'worse' : absDifference < 0.1 ? '' : 'better'}`}>
             {formatTime(estimatedFinishTime)}
           </span>
@@ -102,57 +159,117 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
       <p className="viz-description">
         {absDifference < 0.1
           ? 'Both velocity profiles require the same energy — boats finish together.'
-          : <>If both rowers expend the same total energy, {isCurveBFaster ? 'Rower B finishes ahead' : 'Rower A finishes ahead'} by <span className="distance-diff">{absDifference.toFixed(1)}m</span>.</>
+          : <>With the same total energy, your potential finishes {isCurveBFaster ? 'behind' : 'ahead'} by <span className="distance-diff">{absDifference.toFixed(1)}m</span>.</>
         }
       </p>
 
       <svg viewBox={`0 0 ${svgWidth} ${svgHeight}`} width="100%" className="boat-svg">
+        {/* Water */}
         <rect x="0" y={trackY} width={svgWidth} height={trackHeight} fill="#E3F2FD" stroke="#90CAF9" strokeWidth="1" />
 
-        <line x1={finishLineX} y1={trackY} x2={finishLineX} y2={trackY + trackHeight} stroke="#FF5722" strokeWidth="4" strokeDasharray="5,5" />
-        <text x={finishLineX + 5} y={trackY - 5} fontSize="12" fontWeight="bold" fill="#FF5722">FINISH</text>
+        {/* Finish line */}
+        <line x1={finishLineX} y1={trackY} x2={finishLineX} y2={trackY + trackHeight} stroke="#FF5722" strokeWidth="3" strokeDasharray="4,4" />
+        <text x={finishLineX} y={trackY - 4} fontSize="11" fontWeight="bold" fill="#FF5722" textAnchor="middle">FINISH</text>
 
-        {[1920, 1940, 1960, 1980, 2000].map(dist => {
-          const x = finishLineX - ((raceDistance - dist) * scale);
-          return (
-            <g key={dist}>
-              <line x1={x} y1={trackY + trackHeight} x2={x} y2={trackY + trackHeight + 5} stroke="#999" strokeWidth="1" />
-              <text x={x} y={trackY + trackHeight + 18} fontSize="10" fill="#666" textAnchor="middle">{dist}m</text>
-            </g>
-          );
-        })}
+        {/* Distance markers */}
+        {(() => {
+          const step = visibleDistance <= 100 ? 20
+            : visibleDistance <= 300 ? 50
+            : visibleDistance <= 600 ? 100
+            : 200;
+          const marks = [];
+          for (let d = raceDistance; d >= raceDistance - visibleDistance; d -= step) {
+            marks.push(d);
+          }
+          return marks.map(dist => {
+            const x = finishLineX - ((raceDistance - dist) * scale);
+            return (
+              <g key={dist}>
+                <line x1={x} y1={trackY + trackHeight} x2={x} y2={trackY + trackHeight + 5} stroke="#999" strokeWidth="1" />
+                <text x={x} y={trackY + trackHeight + 16} fontSize="10" fill="#666" textAnchor="middle">{dist}m</text>
+              </g>
+            );
+          });
+        })()}
+
+        {/* Buoy lane markers */}
+        {(() => {
+          const buoys = [];
+          const buoySpacing = 10;
+          const redZone = raceDistance - 250;
+          const startDist = Math.floor((raceDistance - visibleDistance) / buoySpacing) * buoySpacing;
+          for (let d = startDist; d <= raceDistance; d += buoySpacing) {
+            const x = finishLineX - ((raceDistance - d) * scale);
+            if (x < -5 || x > svgWidth + 5) continue;
+            const isRed = d >= redZone;
+            buoys.push(
+              <circle key={`buoy-${d}`} cx={x} cy={buoyY} r={2.5} fill={isRed ? '#dc2626' : '#eab308'} stroke={isRed ? '#991b1b' : '#a16207'} strokeWidth="0.8" />
+            );
+          }
+          return buoys;
+        })()}
 
         {/* Boat A */}
         <g>
-          <rect x={boatAPosition - boatLengthPx} y={trackY + 10} width={boatLengthPx} height={boatHeight} fill="rgba(75, 192, 192, 0.9)" stroke="rgba(75, 192, 192, 1)" strokeWidth="2" rx="3" />
-          <polygon points={`${boatAPosition},${trackY + 10 + boatHeight / 2} ${boatAPosition - 10},${trackY + 10} ${boatAPosition - 10},${trackY + 10 + boatHeight}`} fill="rgba(75, 192, 192, 0.9)" stroke="rgba(75, 192, 192, 1)" strokeWidth="2" />
-          <text x={boatAPosition - boatLengthPx / 2} y={trackY + 20 + boatHeight / 2} fontSize="11" fontWeight="bold" fill="white" textAnchor="middle">Rower A</text>
+          <RowerIcon bowX={boatAPosition} hullLen={boatLengthPx} cy={boatAY} />
+          <text
+            x={boatAPosition - boatLengthPx - 16}
+            y={boatAY + 4}
+            fontSize="11"
+            fontWeight="bold"
+            fill="rgba(45, 140, 140, 1)"
+            textAnchor="end"
+          >Your potential</text>
         </g>
 
         {/* Boat B */}
         <g>
-          <rect x={boatBPosition - boatLengthPx} y={trackY + 30} width={boatLengthPx} height={boatHeight} fill="rgba(255, 99, 132, 0.9)" stroke="rgba(255, 99, 132, 1)" strokeWidth="2" rx="3" />
-          <polygon points={`${boatBPosition},${trackY + 30 + boatHeight / 2} ${boatBPosition - 10},${trackY + 30} ${boatBPosition - 10},${trackY + 30 + boatHeight}`} fill="rgba(255, 99, 132, 0.9)" stroke="rgba(255, 99, 132, 1)" strokeWidth="2" />
-          <text x={boatBPosition - boatLengthPx / 2} y={trackY + 40 + boatHeight / 2} fontSize="11" fontWeight="bold" fill="white" textAnchor="middle">Rower B</text>
+          <RowerIcon bowX={boatBPosition} hullLen={boatLengthPx} cy={boatBY} />
+          <text
+            x={boatBPosition - boatLengthPx - 16}
+            y={boatBY + 4}
+            fontSize="11"
+            fontWeight="bold"
+            fill="rgba(200, 60, 90, 1)"
+            textAnchor="end"
+          >You now</text>
         </g>
 
-        {absDifference > 1 && (
-          <g>
-            <line x1={boatBPosition} y1={trackY + trackHeight + 30} x2={boatAPosition} y2={trackY + trackHeight + 30} stroke="#666" strokeWidth="2" markerEnd="url(#arrowhead)" markerStart="url(#arrowhead)" />
-            <text x={(boatBPosition + boatAPosition) / 2} y={trackY + trackHeight + 45} fontSize="12" fontWeight="bold" fill="#333" textAnchor="middle">{absDifference.toFixed(1)}m</text>
-          </g>
-        )}
-
-        <defs>
-          <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto">
-            <polygon points="0 0, 10 5, 0 10" fill="#666" />
-          </marker>
-        </defs>
+        {/* Dimension line (architectural style) */}
+        {absDifference > 1 && (() => {
+          const dimY = trackY + trackHeight + 24;
+          const tickH = 6;
+          const leftX = Math.min(boatAPosition, boatBPosition);
+          const rightX = Math.max(boatAPosition, boatBPosition);
+          // Extension lines from bow balls down to dimension line
+          const extTop = trackY + trackHeight + 4;
+          return (
+            <g stroke="#555" strokeWidth="1">
+              {/* Extension lines */}
+              <line x1={leftX} y1={extTop} x2={leftX} y2={dimY + tickH} />
+              <line x1={rightX} y1={extTop} x2={rightX} y2={dimY + tickH} />
+              {/* Dimension line */}
+              <line x1={leftX} y1={dimY} x2={rightX} y2={dimY} />
+              {/* Tick marks (perpendicular serifs) */}
+              <line x1={leftX} y1={dimY - tickH} x2={leftX} y2={dimY + tickH} strokeWidth="1.5" />
+              <line x1={rightX} y1={dimY - tickH} x2={rightX} y2={dimY + tickH} strokeWidth="1.5" />
+              {/* Measurement text */}
+              <text
+                x={(leftX + rightX) / 2}
+                y={dimY + tickH + 14}
+                fontSize="12"
+                fontWeight="bold"
+                fill="#333"
+                textAnchor="middle"
+                stroke="none"
+              >{absDifference.toFixed(1)}m</text>
+            </g>
+          );
+        })()}
       </svg>
 
       {absDifference < 0.1 && <p className="viz-note">≈ Curves have similar efficiency profiles.</p>}
-      {absDifference >= 0.1 && isCurveBFaster && <p className="viz-note success">✓ Rower B is more efficient and would finish ahead!</p>}
-      {absDifference >= 0.1 && !isCurveBFaster && <p className="viz-note warning">⚠ Rower B is less efficient and would finish behind.</p>}
+      {absDifference >= 0.1 && isCurveBFaster && <p className="viz-note success">✓ You now are more efficient and would finish ahead!</p>}
     </div>
   );
 }

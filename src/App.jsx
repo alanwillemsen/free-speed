@@ -3,6 +3,8 @@ import SpeedChart from './components/SpeedChart';
 import BoatVisualization from './components/BoatVisualization';
 import SavedCurves, { parseShareHash, EXAMPLE_CURVES } from './components/SavedCurves';
 import CurveHeader from './components/CurveHeader';
+import LiveCapture from './components/LiveCapture';
+import Tradeoffs from './components/Tradeoffs';
 import { normalizeCurve } from './utils/curves';
 import { deriveSimpleLandmarks } from './utils/landmarks';
 import { calculateEnergy, calculateAveragePower, estimateFinishTime, calculateEnergyPenalty } from './utils/physics';
@@ -14,6 +16,23 @@ const RAW_AVG_SPEED = referenceCurveData.speeds.reduce((a, b) => a + b, 0) / ref
 const RACE_DISTANCE = 2000;
 
 function App() {
+  const pageFromHash = () => {
+    if (window.location.hash === '#live') return 'live';
+    if (window.location.hash === '#tradeoffs') return 'tradeoffs';
+    return 'calculator';
+  };
+  const [activePage, setActivePage] = useState(pageFromHash);
+
+  useEffect(() => {
+    const onHash = () => setActivePage(pageFromHash());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('live-mode', activePage === 'live');
+  }, [activePage]);
+
   const [curveARaw] = useState({
     times: referenceCurveData.times,
     speeds: referenceCurveData.speeds,
@@ -154,12 +173,46 @@ function App() {
     setRefreshKey(k => k + 1);
   };
 
+  const handleSaveLiveCurve = (curveData) => {
+    const entry = {
+      id: Date.now(),
+      name: curveData.name,
+      desc: curveData.desc,
+      speeds: curveData.speeds,
+      raceTime: 450,
+      strokeRate: curveData.strokeRate,
+      savedAt: new Date().toISOString(),
+    };
+    const existing = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    localStorage.setItem(STORAGE_KEY, JSON.stringify([entry, ...existing]));
+    setRaceTime(entry.raceTime);
+    setStrokeRate(entry.strokeRate);
+    setCurveB({ times: [...referenceCurveData.times], speeds: entry.speeds });
+    setViewingCurve(entry);
+    setIsDirty(false);
+    setRefreshKey(k => k + 1);
+    window.location.hash = '';
+  };
+
   const avgPowerA = calculateAveragePower(curveA.times, curveA.speeds);
   const avgPowerBNorm = calculateAveragePower(curveBNormalized.times, curveBNormalized.speeds);
   const estimate = estimateFinishTime(raceTime, avgPowerA, avgPowerBNorm);
   const energyA = calculateEnergy(curveA.times, curveA.speeds);
   const energyBNorm = calculateEnergy(curveBNormalized.times, curveBNormalized.speeds);
   const penalty = calculateEnergyPenalty(energyBNorm * raceTime, energyA * raceTime);
+
+  if (activePage === 'live') {
+    return (
+      <LiveCapture
+        onSaveCurve={handleSaveLiveCurve}
+        onBack={() => { window.location.hash = ''; }}
+      />
+    );
+  }
+
+  if (activePage === 'tradeoffs') {
+    return <Tradeoffs onBack={() => { window.location.hash = ''; }} />;
+  }
 
   return (
     <div className="app">
@@ -169,6 +222,10 @@ function App() {
           How much time are you leaving on the water? Draw a boat speed profile and see how
           a smoother stroke — same average speed, less energy — translates to a faster finish time.
         </p>
+        <div className="header-links">
+          <a href="#live" className="live-capture-link">Live Stroke Capture</a>
+          <a href="#tradeoffs" className="live-capture-link">Tradeoffs</a>
+        </div>
       </header>
 
       <div className="app-content">
