@@ -12,7 +12,7 @@ const LABELS = {
   effort: 'Effort (energy spent)',
   outboard: 'Oar outboard',
   inboard: 'Oar inboard',
-  span: 'Span / spread',
+  span: 'Span or spread',
   bladeLength: 'Drive length (blade)',
 };
 
