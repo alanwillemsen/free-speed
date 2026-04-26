@@ -21,7 +21,7 @@ const DESCRIPTIONS = {
   rate: 'Strokes per minute.',
   handLength: 'How far the rower pulls the handle on each stroke.',
   ratio: 'How long the recovery is relative to the drive — higher = smoother run between strokes.',
-  effort: 'Energy the rower spends per stroke.',
+  effort: 'Average energy the rower spends — overall power output, not single-stroke intensity.',
   outboard: 'Pin to blade tip — longer = heavier gearing, longer blade arc.',
   inboard: 'Handle to pin — longer = lighter gearing, shorter blade arc.',
   span: 'Distance between the pins — wider = lighter gearing, shorter blade arc.',
