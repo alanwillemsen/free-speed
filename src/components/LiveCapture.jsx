@@ -198,6 +198,8 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const [detectedOrientation, setDetectedOrientation] = useState(null);
   const [gpsStatus, setGpsStatus] = useState('idle'); // idle | requesting | active | unavailable
   const [hasGPSAnchoring, setHasGPSAnchoring] = useState(false);
+  const [hasRecording, setHasRecording] = useState(false);
+  const [isReplaying, setIsReplaying] = useState(false);
 
   // Processing state lives in refs to avoid stale closures in the 60 Hz handler
   const procRef = useRef(null);
@@ -205,6 +207,8 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const orientationRef = useRef({ beta: 0, gamma: 0 });
   const gpsRef = useRef({ speeds: [], watchId: null });
   const wakeLockRef = useRef(null);
+  const recordingRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   // Detect sensor availability
   useEffect(() => {
@@ -236,11 +240,23 @@ function LiveCapture({ onSaveCurve, onBack }) {
     }
   };
 
-  // Stable motion handler — reads all dynamic values from refs
-  const handleMotion = useRef((event) => {
+  // Stable motion handler — reads all dynamic values from refs.
+  // `nowOverride` lets offline replay drive the handler with recorded timestamps.
+  const handleMotion = useRef((event, nowOverride) => {
     const proc = procRef.current;
     if (!proc) return;
-    const now = performance.now();
+    const now = nowOverride ?? performance.now();
+
+    // Capture raw sample for offline replay (skipped during replay itself)
+    const rec = recordingRef.current;
+    if (rec) {
+      const a = event.acceleration;
+      const ag = event.accelerationIncludingGravity;
+      const sample = { t: now };
+      if (a && a.x != null) { sample.ax = a.x; sample.ay = a.y; sample.az = a.z; }
+      if (ag && ag.x != null) { sample.axg = ag.x; sample.ayg = ag.y; sample.azg = ag.z; }
+      rec.motion.push(sample);
+    }
 
     // --- Gravity compensation ---
     let accelValues;
@@ -360,6 +376,8 @@ function LiveCapture({ onSaveCurve, onBack }) {
     const handler = (e) => {
       if (e.beta != null) {
         orientationRef.current = { beta: e.beta, gamma: e.gamma };
+        const rec = recordingRef.current;
+        if (rec) rec.orientation.push({ t: performance.now(), beta: e.beta, gamma: e.gamma });
       }
     };
     window.addEventListener('deviceorientation', handler);
@@ -410,6 +428,14 @@ function LiveCapture({ onSaveCurve, onBack }) {
         done: false,
       },
     };
+    recordingRef.current = {
+      version: 1,
+      startedAt: new Date().toISOString(),
+      userAgent: navigator.userAgent,
+      motion: [],
+      orientation: [],
+      gps: [],
+    };
     setStrokeRate(0);
     setStrokeCount(0);
     setLastStroke(null);
@@ -418,6 +444,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     setCalibrationStatus('calibrating');
     setDetectedOrientation(null);
     setHasGPSAnchoring(false);
+    setHasRecording(false);
     setIsCapturing(true);
 
     // Start GPS tracking
@@ -431,6 +458,8 @@ function LiveCapture({ onSaveCurve, onBack }) {
             // Keep last 30 seconds
             const cutoff = performance.now() - 30000;
             gpsRef.current.speeds = gpsRef.current.speeds.filter(s => s.time > cutoff);
+            const rec = recordingRef.current;
+            if (rec) rec.gps.push({ t: gpsTime, speed: pos.coords.speed });
           }
           setGpsStatus('active');
         },
@@ -468,6 +497,121 @@ function LiveCapture({ onSaveCurve, onBack }) {
     }
     wakeLockRef.current?.release().catch(() => {});
     wakeLockRef.current = null;
+    const rec = recordingRef.current;
+    if (rec && rec.motion.length > 0) setHasRecording(true);
+  };
+
+  const downloadRecording = () => {
+    const rec = recordingRef.current;
+    if (!rec || rec.motion.length === 0) return;
+    const json = JSON.stringify(rec);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const stamp = (rec.startedAt || new Date().toISOString()).replace(/[:.]/g, '-');
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `free-speed-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const replayRecording = (recording) => {
+    procRef.current = {
+      filteredAccel: 0,
+      strokeDetect: 0,
+      prevStrokeDetect: 0,
+      buffer: [],
+      lastBoundaryTime: 0,
+      boundaryTimes: [],
+      strokes: [],
+      strokeCount: 0,
+      strokeRate: 0,
+      lastStroke: null,
+      avgCurve: null,
+      hasGPS: false,
+      detectedOrientation: null,
+      calibration: {
+        startTime: recording.motion[0]?.t ?? 0,
+        samples: { x: [], y: [], z: [] },
+        done: false,
+      },
+    };
+    gpsRef.current.speeds = [];
+    orientationRef.current = { beta: 0, gamma: 0 };
+
+    // Disable live recording so the replay doesn't double-record into the source data
+    recordingRef.current = null;
+
+    const events = [];
+    for (const m of recording.motion || []) events.push({ k: 'm', t: m.t, d: m });
+    for (const o of recording.orientation || []) events.push({ k: 'o', t: o.t, d: o });
+    for (const g of recording.gps || []) events.push({ k: 'g', t: g.t, d: g });
+    events.sort((a, b) => a.t - b.t);
+
+    for (const ev of events) {
+      if (ev.k === 'o') {
+        if (ev.d.beta != null) orientationRef.current = { beta: ev.d.beta, gamma: ev.d.gamma };
+      } else if (ev.k === 'g') {
+        gpsRef.current.speeds.push({ time: ev.t, speed: ev.d.speed });
+        const cutoff = ev.t - 30000;
+        gpsRef.current.speeds = gpsRef.current.speeds.filter(s => s.time > cutoff);
+      } else {
+        const fakeEvent = {
+          acceleration: ev.d.ax != null ? { x: ev.d.ax, y: ev.d.ay, z: ev.d.az } : null,
+          accelerationIncludingGravity: ev.d.axg != null
+            ? { x: ev.d.axg, y: ev.d.ayg, z: ev.d.azg }
+            : null,
+        };
+        handleMotion.current(fakeEvent, ev.t);
+      }
+    }
+
+    // Restore so a follow-up download re-exports the same recording
+    recordingRef.current = recording;
+
+    const proc = procRef.current;
+    setStrokeRate(proc.strokeRate);
+    setStrokeCount(proc.strokeCount);
+    setLastStroke(proc.lastStroke);
+    setAvgCurve(proc.avgCurve);
+    setCurrentAccel(proc.filteredAccel);
+    setHasGPSAnchoring(proc.hasGPS);
+    if (proc.detectedOrientation) {
+      setCalibrationStatus('detected');
+      setDetectedOrientation(proc.detectedOrientation);
+    } else {
+      setCalibrationStatus('idle');
+      setDetectedOrientation(null);
+    }
+    setHasRecording(true);
+  };
+
+  const handleLoadRecording = (file) => {
+    setIsReplaying(true);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      // Yield so the "Replaying…" button state renders before the (potentially
+      // multi-second) synchronous replay blocks the main thread.
+      setTimeout(() => {
+        try {
+          const recording = JSON.parse(e.target.result);
+          if (!recording.motion || !Array.isArray(recording.motion)) {
+            throw new Error('missing motion array');
+          }
+          replayRecording(recording);
+        } catch (err) {
+          alert('Failed to load recording: ' + err.message);
+        }
+        setIsReplaying(false);
+      }, 50);
+    };
+    reader.onerror = () => {
+      alert('Failed to read file');
+      setIsReplaying(false);
+    };
+    reader.readAsText(file);
   };
 
   const handleSave = () => {
@@ -718,6 +862,33 @@ function LiveCapture({ onSaveCurve, onBack }) {
               <button className="btn btn-primary btn-large" onClick={handleSave}>
                 Save & Open in Calculator
               </button>
+            )}
+            {!isCapturing && hasRecording && (
+              <button className="btn btn-secondary btn-large" onClick={downloadRecording}>
+                Download recording
+              </button>
+            )}
+            {!isCapturing && (
+              <>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="application/json,.json"
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) handleLoadRecording(f);
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  className="btn btn-secondary btn-large"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isReplaying}
+                >
+                  {isReplaying ? 'Replaying…' : 'Load recording'}
+                </button>
+              </>
             )}
           </div>
         </>
