@@ -176,6 +176,8 @@ const ORIENTATION_LABELS = {
   'x-': 'Landscape — left toward bow',
   'y+': 'Portrait — top toward bow',
   'y-': 'Portrait — bottom toward bow',
+  'z+': 'Upright — back of phone toward bow',
+  'z-': 'Upright — screen toward bow',
 };
 
 function orientationLabel(axis, sign) {
@@ -278,8 +280,10 @@ function LiveCapture({ onSaveCurve, onBack }) {
       if (now - proc.calibration.startTime >= CALIBRATION_MS) {
         const varX = variance(proc.calibration.samples.x);
         const varY = variance(proc.calibration.samples.y);
-        // z-axis is vertical when phone is flat — ignore it
-        const maxVar = Math.max(varX, varY);
+        const varZ = variance(proc.calibration.samples.z);
+        // All three axes considered: boat-motion axis is whichever has the
+        // largest variance, regardless of how the phone is mounted.
+        const maxVar = Math.max(varX, varY, varZ);
 
         if (maxVar < 0.5) {
           // No meaningful motion yet — extend calibration
@@ -288,7 +292,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
           return;
         }
 
-        const axis = varX > varY ? 'x' : 'y';
+        const axis = varX === maxVar ? 'x' : varY === maxVar ? 'y' : 'z';
         const samples = proc.calibration.samples[axis];
         // Sign: the largest absolute spike is from the drive (forward push)
         const maxAbsIdx = samples.reduce(
@@ -784,8 +788,8 @@ function LiveCapture({ onSaveCurve, onBack }) {
       {sensorStatus === 'available' && (
         <>
           <div className="live-guide">
-            Mount your phone flat in the boat with the screen facing up.
-            Orientation is detected automatically — just start rowing.
+            Mount your phone anywhere stable in the boat — flat, upright, or on
+            its side. Orientation is detected automatically; just start rowing.
           </div>
 
           <div className="live-stats">
