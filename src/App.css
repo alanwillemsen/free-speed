@@ -1283,6 +1283,33 @@ html.live-mode body {
   pointer-events: none;
 }
 
+.live-time-chart {
+  padding: 0.5rem 0.75rem 0.75rem;
+  background: white;
+  border-top: 1px solid #e2e8f0;
+}
+
+.live-time-chart-wrapper {
+  height: 140px;
+}
+
+.live-time-chart-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-top: 0.4rem;
+  font-size: 0.82rem;
+  color: #4a5568;
+  flex-wrap: wrap;
+}
+
+.live-time-chart-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
 .live-axis-config {
   display: flex;
   align-items: center;

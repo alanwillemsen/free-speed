@@ -37,10 +37,12 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
   const timesA_s = timesA.map(t => t * strokeDuration);
   const timesB_s = timesB.map(t => t * strokeDuration);
 
-  // Create annotations for landmarks
+  // Create annotations for landmarks (PEAK SPEED is computed but not shown)
+  const annotatedLandmarks = (landmarks || []).filter(l => l.label !== 'PEAK SPEED');
+  const annotatedLandmarksB = (landmarksB || []).filter(l => l.label !== 'PEAK SPEED');
   const landmarkAnnotations = {};
-  if (landmarks && landmarks.length > 0) {
-    landmarks.forEach((landmark, idx) => {
+  if (annotatedLandmarks.length > 0) {
+    annotatedLandmarks.forEach((landmark, idx) => {
       landmarkAnnotations[`landmark_${idx}`] = {
         type: 'line',
         xMin: landmark.time * strokeDuration,
@@ -66,8 +68,8 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
   }
 
   // Rower B landmark annotations
-  if (landmarksB && landmarksB.length > 0) {
-    landmarksB.forEach((landmark, idx) => {
+  if (annotatedLandmarksB.length > 0) {
+    annotatedLandmarksB.forEach((landmark, idx) => {
       landmarkAnnotations[`landmarkB_${idx}`] = {
         type: 'line',
         xMin: landmark.time * strokeDuration,

@@ -10,9 +10,10 @@ import {
   Filler,
 } from 'chart.js';
 import { Line } from 'react-chartjs-2';
+import zoomPlugin from 'chartjs-plugin-zoom';
 import referenceCurveData from '../data/referenceCurve.json';
 
-ChartJS.register(LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler);
+ChartJS.register(LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler, zoomPlugin);
 
 // --- Constants ---
 const NUM_POINTS = 33;
@@ -20,7 +21,7 @@ const NOISE_ALPHA = 0.4;          // EMA alpha for noise reduction
 const STROKE_DETECT_ALPHA = 0.06; // EMA alpha for stroke boundary detection
 const MIN_STROKE_MS = 800;
 const MAX_STROKE_MS = 4000;
-const MAX_STROKES = 20;           // Rolling window for averaging
+const MAX_STROKES = 500;          // Rolling window for averaging
 const UI_UPDATE_MS = 250;
 const CALIBRATION_MS = 3000;      // Auto-orientation calibration window
 
@@ -164,7 +165,8 @@ function averageCurves(strokes) {
   if (strokes.length === 0) return null;
   const avg = new Array(NUM_POINTS).fill(0);
   for (const s of strokes) {
-    for (let i = 0; i < NUM_POINTS; i++) avg[i] += s[i];
+    const curve = s.curve ?? s;
+    for (let i = 0; i < NUM_POINTS; i++) avg[i] += curve[i];
   }
   for (let i = 0; i < NUM_POINTS; i++) avg[i] /= strokes.length;
   return avg;
@@ -202,6 +204,15 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const [hasGPSAnchoring, setHasGPSAnchoring] = useState(false);
   const [hasRecording, setHasRecording] = useState(false);
   const [isReplaying, setIsReplaying] = useState(false);
+  // Snapshot of all strokes after stop/replay — enables time-range selection.
+  // Each entry: { time: ms, curve: number[NUM_POINTS], avgSpeed: number }.
+  const [strokes, setStrokes] = useState([]);
+  // Selection in stroke-time coordinates (same units as `time` above), or null = all.
+  const [selection, setSelection] = useState(null);
+  // Index into `strokes` for showing a single stroke instead of the average.
+  // null = show average.
+  const [selectedIndex, setSelectedIndex] = useState(null);
+  const timeChartRef = useRef(null);
 
   // Processing state lives in refs to avoid stale closures in the 60 Hz handler
   const procRef = useRef(null);
@@ -344,7 +355,8 @@ function LiveCapture({ onSaveCurve, onBack }) {
         }
 
         if (curve) {
-          proc.strokes.push(curve);
+          const avgSpeed = curve.reduce((a, b) => a + b, 0) / curve.length;
+          proc.strokes.push({ time: now, curve, avgSpeed });
           if (proc.strokes.length > MAX_STROKES) proc.strokes.shift();
           proc.strokeCount++;
           proc.lastStroke = curve;
@@ -449,6 +461,9 @@ function LiveCapture({ onSaveCurve, onBack }) {
     setDetectedOrientation(null);
     setHasGPSAnchoring(false);
     setHasRecording(false);
+    setStrokes([]);
+    setSelection(null);
+    setSelectedIndex(null);
     setIsCapturing(true);
 
     // Start GPS tracking
@@ -493,6 +508,9 @@ function LiveCapture({ onSaveCurve, onBack }) {
       setLastStroke(proc.lastStroke);
       setAvgCurve(proc.avgCurve);
       setHasGPSAnchoring(proc.hasGPS);
+      setStrokes([...proc.strokes]);
+      setSelection(null);
+      setSelectedIndex(null);
     }
     // Stop GPS
     if (gpsRef.current.watchId != null) {
@@ -589,6 +607,9 @@ function LiveCapture({ onSaveCurve, onBack }) {
       setCalibrationStatus('idle');
       setDetectedOrientation(null);
     }
+    setStrokes([...proc.strokes]);
+    setSelection(null);
+    setSelectedIndex(null);
     setHasRecording(true);
   };
 
@@ -619,27 +640,50 @@ function LiveCapture({ onSaveCurve, onBack }) {
   };
 
   const handleSave = () => {
-    if (!avgCurve || !onSaveCurve) return;
+    const curveToSave = displayAvgCurve;
+    if (!curveToSave || !onSaveCurve) return;
 
     let scaledSpeeds;
+    let raceTime;
     if (hasGPSAnchoring) {
       // GPS-anchored curves are already in real m/s — pass through as-is
-      scaledSpeeds = [...avgCurve];
+      scaledSpeeds = [...curveToSave];
+      const curAvg = curveToSave.reduce((a, b) => a + b, 0) / curveToSave.length;
+      // 2000m finish time at the measured average boat speed
+      if (curAvg > 0) raceTime = 2000 / curAvg;
     } else {
       // Scale captured average so its mean matches the reference curve
-      const curAvg = avgCurve.reduce((a, b) => a + b, 0) / avgCurve.length;
+      const curAvg = curveToSave.reduce((a, b) => a + b, 0) / curveToSave.length;
       const scale = REF_AVG / curAvg;
-      scaledSpeeds = avgCurve.map(v => v * scale);
+      scaledSpeeds = curveToSave.map(v => v * scale);
     }
     onSaveCurve({
       name: `Live Capture ${new Date().toLocaleString()}`,
-      desc: `${strokeCount} strokes at ${strokeRate} spm${hasGPSAnchoring ? ' (GPS)' : ''}`,
+      desc: `${displayCount} strokes at ${strokeRate} spm${hasGPSAnchoring ? ' (GPS)' : ''}`,
       speeds: scaledSpeeds,
       strokeRate: strokeRate || 36,
+      raceTime,
     });
   };
 
   // --- Chart ---
+
+  // When we have a stroke snapshot (after stop/replay), derive the average from
+  // the selected subset. Otherwise (live capture) fall back to the running avg.
+  const selectedStrokes = useMemo(() => {
+    if (strokes.length === 0) return null;
+    if (!selection) return strokes;
+    return strokes.filter(s => s.time >= selection.min && s.time <= selection.max);
+  }, [strokes, selection]);
+
+  const displayAvgCurve = useMemo(() => {
+    if (selectedStrokes && selectedStrokes.length > 0) return averageCurves(selectedStrokes);
+    return avgCurve;
+  }, [selectedStrokes, avgCurve]);
+
+  const displayCount = selectedStrokes ? selectedStrokes.length : strokeCount;
+
+  const individualStroke = (selectedIndex != null && strokes[selectedIndex]) || null;
 
   const chartData = useMemo(() => {
     const datasets = [
@@ -655,20 +699,35 @@ function LiveCapture({ onSaveCurve, onBack }) {
       },
     ];
 
-    if (avgCurve) {
+    if (displayAvgCurve) {
       datasets.push({
-        label: `Average (${strokeCount} strokes)`,
-        data: avgCurve.map((s, i) => ({ x: PHASE_TIMES[i], y: s })),
-        borderColor: '#667eea',
-        backgroundColor: 'rgba(102, 126, 234, 0.1)',
+        label: individualStroke
+          ? `Average (${displayCount} strokes)`
+          : `Average (${displayCount} strokes)`,
+        data: displayAvgCurve.map((s, i) => ({ x: PHASE_TIMES[i], y: s })),
+        borderColor: individualStroke ? 'rgba(102, 126, 234, 0.35)' : '#667eea',
+        backgroundColor: individualStroke
+          ? 'rgba(102, 126, 234, 0.04)'
+          : 'rgba(102, 126, 234, 0.1)',
+        borderWidth: individualStroke ? 2 : 3,
+        pointRadius: 0,
+        tension: 0.4,
+        fill: !individualStroke,
+      });
+    }
+
+    if (individualStroke) {
+      datasets.push({
+        label: `Stroke #${selectedIndex + 1} of ${strokes.length}`,
+        data: individualStroke.curve.map((s, i) => ({ x: PHASE_TIMES[i], y: s })),
+        borderColor: '#ef4444',
+        backgroundColor: 'rgba(239, 68, 68, 0.1)',
         borderWidth: 3,
         pointRadius: 0,
         tension: 0.4,
         fill: true,
       });
-    }
-
-    if (lastStroke && avgCurve) {
+    } else if (lastStroke && displayAvgCurve) {
       datasets.push({
         label: 'Last Stroke',
         data: lastStroke.map((s, i) => ({ x: PHASE_TIMES[i], y: s })),
@@ -681,7 +740,114 @@ function LiveCapture({ onSaveCurve, onBack }) {
     }
 
     return { datasets };
-  }, [avgCurve, lastStroke, strokeCount]);
+  }, [displayAvgCurve, lastStroke, displayCount, individualStroke, selectedIndex, strokes.length]);
+
+  // --- Stroke-time chart (one point per stroke, drag-to-select range) ---
+
+  // When GPS-anchored, display y as 500m split (seconds). Faster strokes = lower
+  // split = lower on chart, matching standard rowing dashboards.
+  const formatSplit = (seconds) => {
+    if (!isFinite(seconds) || seconds <= 0) return '—';
+    const m = Math.floor(seconds / 60);
+    const s = seconds - m * 60;
+    return `${m}:${s.toFixed(1).padStart(4, '0')}`;
+  };
+  const speedToY = (speed) => (hasGPSAnchoring && speed > 0 ? 500 / speed : speed);
+
+  const t0 = strokes.length > 0 ? strokes[0].time : 0;
+  const timeChartData = useMemo(() => {
+    if (strokes.length === 0) return { datasets: [] };
+    return {
+      datasets: [{
+        label: 'Stroke split',
+        data: strokes.map(s => ({ x: (s.time - t0) / 1000, y: speedToY(s.avgSpeed) })),
+        borderColor: '#667eea',
+        backgroundColor: (ctx) => ctx.dataIndex === selectedIndex ? '#ef4444' : '#667eea',
+        borderWidth: 1.5,
+        pointRadius: (ctx) => ctx.dataIndex === selectedIndex ? 6 : 2.5,
+        pointHoverRadius: 6,
+        tension: 0,
+        fill: false,
+      }],
+    };
+  }, [strokes, t0, selectedIndex, hasGPSAnchoring]);
+
+  const timeChartOptions = useMemo(() => ({
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    onClick: (_event, elements) => {
+      if (elements.length > 0) setSelectedIndex(elements[0].index);
+    },
+    plugins: {
+      legend: { display: false },
+      title: {
+        display: true,
+        text: 'Click a stroke to inspect • drag to select a range',
+        font: { size: 13, weight: 'normal' },
+      },
+      tooltip: { enabled: false },
+      zoom: {
+        zoom: {
+          drag: {
+            enabled: true,
+            backgroundColor: 'rgba(102, 126, 234, 0.2)',
+            borderColor: 'rgba(102, 126, 234, 0.6)',
+            borderWidth: 1,
+          },
+          mode: 'x',
+          onZoomComplete: ({ chart }) => {
+            const { min, max } = chart.scales.x;
+            // x is in seconds since first stroke; selection is in absolute ms.
+            setSelection({ min: t0 + min * 1000, max: t0 + max * 1000 });
+          },
+        },
+        pan: { enabled: false },
+      },
+    },
+    scales: {
+      x: {
+        type: 'linear',
+        title: { display: true, text: 'Time (s)', font: { size: 11 } },
+      },
+      y: {
+        title: {
+          display: true,
+          text: hasGPSAnchoring ? 'Split / 500m' : 'Avg speed (relative)',
+          font: { size: 11 },
+        },
+        ticks: hasGPSAnchoring
+          ? { callback: (v) => formatSplit(v) }
+          : undefined,
+      },
+    },
+  }), [t0, hasGPSAnchoring]);
+
+  const resetSelection = () => {
+    setSelection(null);
+    timeChartRef.current?.resetZoom();
+  };
+
+  // Prev/next step through strokes — when a range is selected, restrict to it.
+  const stepStroke = (dir) => {
+    if (strokes.length === 0) return;
+    const inRange = (i) =>
+      !selection ||
+      (strokes[i].time >= selection.min && strokes[i].time <= selection.max);
+    let i = selectedIndex;
+    if (i == null) {
+      // Start from the first in-range stroke (or end, depending on direction)
+      i = dir > 0 ? -1 : strokes.length;
+    }
+    for (let step = 0; step < strokes.length; step++) {
+      i += dir;
+      if (i < 0 || i >= strokes.length) return;
+      if (inRange(i)) {
+        setSelectedIndex(i);
+        return;
+      }
+    }
+  };
 
   const chartOptions = useMemo(() => ({
     responsive: true,
@@ -837,6 +1003,52 @@ function LiveCapture({ onSaveCurve, onBack }) {
               <div className="live-chart-overlay">Tap Start Capture, then row</div>
             )}
           </div>
+
+          {!isCapturing && strokes.length > 1 && (
+            <div className="live-time-chart">
+              <div className="live-time-chart-wrapper">
+                <Line ref={timeChartRef} data={timeChartData} options={timeChartOptions} />
+              </div>
+              <div className="live-time-chart-footer">
+                <span>
+                  {individualStroke
+                    ? `Viewing stroke #${selectedIndex + 1} of ${strokes.length}`
+                    : selection
+                      ? `${displayCount} of ${strokes.length} strokes selected`
+                      : `All ${strokes.length} strokes`}
+                </span>
+                <div className="live-time-chart-actions">
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => stepStroke(-1)}
+                    disabled={strokes.length === 0}
+                  >
+                    ← Prev
+                  </button>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => stepStroke(1)}
+                    disabled={strokes.length === 0}
+                  >
+                    Next →
+                  </button>
+                  {individualStroke && (
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => setSelectedIndex(null)}
+                    >
+                      Show average
+                    </button>
+                  )}
+                  {selection && (
+                    <button className="btn btn-secondary btn-sm" onClick={resetSelection}>
+                      Reset range
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="live-axis-config">
             {calibrationStatus === 'detected' && detectedOrientation && (
