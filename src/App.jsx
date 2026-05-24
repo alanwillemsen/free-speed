@@ -4,6 +4,7 @@ import BoatVisualization from './components/BoatVisualization';
 import SavedCurves, { parseShareHash, EXAMPLE_CURVES } from './components/SavedCurves';
 import CurveHeader from './components/CurveHeader';
 import LiveCapture from './components/LiveCapture';
+import OarCapture from './components/OarCapture';
 import Tradeoffs from './components/Tradeoffs';
 import { normalizeCurve } from './utils/curves';
 import { deriveSimpleLandmarks } from './utils/landmarks';
@@ -17,8 +18,10 @@ const RACE_DISTANCE = 2000;
 
 function App() {
   const pageFromHash = () => {
-    if (window.location.hash === '#live') return 'live';
-    if (window.location.hash === '#tradeoffs') return 'tradeoffs';
+    const h = window.location.hash;
+    if (h === '#live') return 'live';
+    if (h === '#oar' || h.startsWith('#oar?')) return 'oar';
+    if (h === '#tradeoffs') return 'tradeoffs';
     return 'calculator';
   };
   const [activePage, setActivePage] = useState(pageFromHash);
@@ -179,7 +182,7 @@ function App() {
       name: curveData.name,
       desc: curveData.desc,
       speeds: curveData.speeds,
-      raceTime: 450,
+      raceTime: curveData.raceTime ?? 450,
       strokeRate: curveData.strokeRate,
       savedAt: new Date().toISOString(),
     };
@@ -210,6 +213,10 @@ function App() {
     );
   }
 
+  if (activePage === 'oar') {
+    return <OarCapture onBack={() => { window.location.hash = ''; }} />;
+  }
+
   if (activePage === 'tradeoffs') {
     return <Tradeoffs onBack={() => { window.location.hash = ''; }} />;
   }
@@ -224,6 +231,7 @@ function App() {
         </p>
         <div className="header-links">
           <a href="#live" className="live-capture-link">Live Stroke Capture</a>
+          <a href="#oar" className="live-capture-link">Oar Capture</a>
           <a href="#tradeoffs" className="live-capture-link">Tradeoffs</a>
         </div>
       </header>

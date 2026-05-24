@@ -1452,3 +1452,191 @@ html.live-mode body {
     font-size: 1.3rem;
   }
 }
+
+/* ---------- Oar Capture ---------- */
+
+.oar-capture {
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: #f5f7fa;
+  max-width: 600px;
+  margin: 0 auto;
+  padding-bottom: 2rem;
+}
+
+.oar-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+  background: linear-gradient(135deg, #667eea 0%, #5568d3 100%);
+  color: white;
+}
+
+.oar-header h1 {
+  font-size: 1.1rem;
+  font-weight: 700;
+  flex: 1;
+  text-align: center;
+  margin-right: 2rem;
+}
+
+.oar-header .btn {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  flex-shrink: 0;
+}
+
+.oar-header .btn:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.oar-section {
+  background: white;
+  margin: 0.75rem;
+  padding: 0.9rem 1rem;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.oar-section h2 {
+  font-size: 0.95rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #4a5568;
+  margin: 0 0 0.7rem 0;
+}
+
+.oar-section .btn {
+  margin-right: 0.5rem;
+}
+
+.oar-role-toggle {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.oar-role-toggle label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+
+.oar-role-toggle label.active {
+  border-color: #667eea;
+  background: #edf0ff;
+  color: #2d3748;
+}
+
+.oar-status {
+  font-size: 0.9rem;
+  color: #4a5568;
+  margin: 0 0 0.6rem 0;
+}
+
+.oar-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9rem;
+  margin: 0.3rem 0;
+  word-break: break-all;
+}
+
+.oar-mono strong {
+  background: #edf2f7;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}
+
+.oar-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.oar-row input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid #cbd5e0;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.oar-counters {
+  margin-top: 0.8rem;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.2rem 1rem;
+  font-size: 0.85rem;
+  color: #4a5568;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.oar-source-tag {
+  margin-left: 0.6rem;
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: #718096;
+  background: #edf2f7;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+}
+
+.oar-chart {
+  height: 180px;
+  position: relative;
+}
+
+.oar-join-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.4rem 0 0.8rem;
+}
+
+.oar-short-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 2.2rem;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  color: #2d3748;
+  background: #edf2f7;
+  padding: 0.3rem 0.9rem;
+  border-radius: 8px;
+}
+
+.oar-join-hint {
+  font-size: 0.78rem;
+  color: #718096;
+  text-align: center;
+}
+
+.oar-qr {
+  width: 200px;
+  height: 200px;
+  image-rendering: pixelated;
+  background: white;
+  padding: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.oar-hint {
+  font-size: 0.78rem;
+  color: #718096;
+  margin: 0.5rem 0 0 0;
+  line-height: 1.4;
+}
