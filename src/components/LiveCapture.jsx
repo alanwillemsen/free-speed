@@ -26,6 +26,8 @@ const MAX_STROKES = 500;          // Rolling window for averaging
 const UI_UPDATE_MS = 250;
 const CALIBRATION_MS = 3000;      // Auto-orientation calibration window
 const SEND_BATCH_MS = 100;        // Batch outgoing samples this often when coach-linked
+const SPLIT_WINDOW_MS = 5000;     // GPS-speed averaging window for per-stroke split
+const SPLIT_MAX_SPEED = 12;       // m/s sanity bound — drop GPS speed spikes
 
 const PHASE_TIMES = Array.from({ length: NUM_POINTS }, (_, i) => i / (NUM_POINTS - 1));
 const REF_SPEEDS = referenceCurveData.speeds;
@@ -163,6 +165,22 @@ function processStrokeWithGPS(samples, gpsSpeeds) {
   return resampled;
 }
 
+// Average GPS speed (m/s) over [endTime - windowMs, endTime], dropping
+// non-positive and implausibly high readings. GPS is ~1 Hz, so a single stroke
+// is too sparse for an accurate split; the multi-second window filters jitter.
+// Returns null when no usable sample falls in the window.
+function windowedGpsSpeed(gpsSpeeds, endTime, windowMs) {
+  const start = endTime - windowMs;
+  let sum = 0, n = 0;
+  for (const g of gpsSpeeds) {
+    if (g.time >= start && g.time <= endTime && g.speed > 0 && g.speed < SPLIT_MAX_SPEED) {
+      sum += g.speed;
+      n++;
+    }
+  }
+  return n > 0 ? sum / n : null;
+}
+
 function averageCurves(strokes) {
   if (strokes.length === 0) return null;
   const avg = new Array(NUM_POINTS).fill(0);
@@ -208,6 +226,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const [strokeCount, setStrokeCount] = useState(0);
   const [lastStroke, setLastStroke] = useState(null);
   const [avgCurve, setAvgCurve] = useState(null);
+  const [liveSplitSpeed, setLiveSplitSpeed] = useState(null); // GPS speed (m/s) of the latest stroke
   const [calibrationStatus, setCalibrationStatus] = useState('idle'); // idle | calibrating | detected
   const [detectedOrientation, setDetectedOrientation] = useState(null);
   const [gpsStatus, setGpsStatus] = useState('idle'); // idle | requesting | active | unavailable
@@ -374,10 +393,16 @@ function LiveCapture({ onSaveCurve, onBack }) {
 
         if (curve) {
           const avgSpeed = curve.reduce((a, b) => a + b, 0) / curve.length;
-          proc.strokes.push({ time: now, curve, avgSpeed });
+          // Split comes from GPS (accurate absolute speed), not the IMU curve
+          // mean (good for shape, drifty for magnitude). Smoothed over a window.
+          const gpsSpeed = proc.hasGPS
+            ? windowedGpsSpeed(gps, now, Math.max(elapsed, SPLIT_WINDOW_MS))
+            : null;
+          proc.strokes.push({ time: now, curve, avgSpeed, gpsSpeed });
           if (proc.strokes.length > MAX_STROKES) proc.strokes.shift();
           proc.strokeCount++;
           proc.lastStroke = curve;
+          proc.lastGpsSpeed = gpsSpeed;
           proc.avgCurve = averageCurves(proc.strokes);
 
           proc.boundaryTimes.push(now);
@@ -410,6 +435,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     strokeCount: 0,
     strokeRate: 0,
     lastStroke: null,
+    lastGpsSpeed: null,
     avgCurve: null,
     hasGPS: false,
     detectedOrientation: null,
@@ -435,6 +461,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     setStrokeCount(0);
     setLastStroke(null);
     setAvgCurve(null);
+    setLiveSplitSpeed(null);
     setCalibrationStatus('calibrating');
     setDetectedOrientation(null);
     setHasGPSAnchoring(false);
@@ -615,6 +642,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
       setStrokeRate(proc.strokeRate);
       setStrokeCount(proc.strokeCount);
       setLastStroke(proc.lastStroke);
+      setLiveSplitSpeed(proc.lastGpsSpeed ?? null);
       setAvgCurve(proc.avgCurve);
       setHasGPSAnchoring(proc.hasGPS);
 
@@ -658,6 +686,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     setStrokeCount(0);
     setLastStroke(null);
     setAvgCurve(null);
+    setLiveSplitSpeed(null);
     setCalibrationStatus('calibrating');
     setDetectedOrientation(null);
     setHasGPSAnchoring(false);
@@ -947,7 +976,12 @@ function LiveCapture({ onSaveCurve, onBack }) {
     const s = seconds - m * 60;
     return `${m}:${s.toFixed(1).padStart(4, '0')}`;
   };
-  const speedToY = (speed) => (hasGPSAnchoring && speed > 0 ? 500 / speed : speed);
+  // Per-stroke y value: GPS-derived split (s/500m) when anchored, else the
+  // relative curve mean. Null when anchored but this stroke lacked GPS (gaps).
+  const strokeY = (s) => {
+    if (hasGPSAnchoring) return s.gpsSpeed > 0 ? 500 / s.gpsSpeed : null;
+    return s.avgSpeed;
+  };
 
   const t0 = strokes.length > 0 ? strokes[0].time : 0;
   const timeChartData = useMemo(() => {
@@ -955,7 +989,8 @@ function LiveCapture({ onSaveCurve, onBack }) {
     return {
       datasets: [{
         label: 'Stroke split',
-        data: strokes.map(s => ({ x: (s.time - t0) / 1000, y: speedToY(s.avgSpeed) })),
+        data: strokes.map(s => ({ x: (s.time - t0) / 1000, y: strokeY(s) })),
+        spanGaps: true,
         borderColor: '#667eea',
         backgroundColor: (ctx) => ctx.dataIndex === selectedIndex ? '#ef4444' : '#667eea',
         borderWidth: 1.5,
@@ -1180,16 +1215,20 @@ function LiveCapture({ onSaveCurve, onBack }) {
     </div>
   );
 
-  // Boat speed as a 500m split. Live: the latest stroke; while inspecting a
-  // single stroke, that stroke. Only meaningful when GPS-anchored (real m/s);
-  // otherwise the curve is a relative shape, so we show no split.
-  const splitCurve = individualStroke
-    ? individualStroke.curve
-    : (isLive ? lastStroke : displayAvgCurve);
-  const splitAvg = splitCurve && splitCurve.length
-    ? splitCurve.reduce((a, b) => a + b, 0) / splitCurve.length
-    : 0;
-  const splitText = hasGPSAnchoring && splitAvg > 0 ? formatSplit(500 / splitAvg) : '—';
+  // Boat speed as a 500m split, from GPS speed (accurate) rather than the IMU
+  // curve. Inspecting a stroke → that stroke; reviewing a range → its mean;
+  // live → the latest stroke. Only meaningful when GPS-anchored.
+  const splitFromStroke = (s) => (s && s.gpsSpeed > 0 ? s.gpsSpeed : null);
+  let displaySplitSpeed = null;
+  if (individualStroke) {
+    displaySplitSpeed = splitFromStroke(individualStroke);
+  } else if (selectedStrokes && selectedStrokes.length > 0) {
+    const vals = selectedStrokes.map(splitFromStroke).filter((v) => v != null);
+    displaySplitSpeed = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+  } else {
+    displaySplitSpeed = liveSplitSpeed;
+  }
+  const splitText = hasGPSAnchoring && displaySplitSpeed > 0 ? formatSplit(500 / displaySplitSpeed) : '—';
 
   const statsView = (
     <div className="live-stats">
@@ -1201,7 +1240,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
         <span className="live-stat-value">{strokeCount}</span>
         <span className="live-stat-label">strokes</span>
       </div>
-      {(isLive || splitCurve) && (
+      {(isLive || strokes.length > 0) && (
         <div className="live-stat">
           <span className="live-stat-value live-split-value">{splitText}</span>
           <span className="live-stat-label">/500m</span>
@@ -1256,9 +1295,11 @@ function LiveCapture({ onSaveCurve, onBack }) {
         <span>
           {isPaused ? 'Paused · ' : ''}
           {individualStroke
-            ? `Viewing stroke #${selectedIndex + 1} of ${strokes.length}`
+            ? `Viewing stroke #${selectedIndex + 1} of ${strokes.length}${
+                splitText !== '—' ? ` · ${splitText} /500m` : ''}`
             : selection
-              ? `${displayCount} of ${strokes.length} strokes selected`
+              ? `${displayCount} of ${strokes.length} strokes selected${
+                  splitText !== '—' ? ` · ${splitText} /500m` : ''}`
               : `All ${strokes.length} strokes`}
         </span>
         <div className="live-time-chart-actions">
