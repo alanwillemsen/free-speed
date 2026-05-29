@@ -10,11 +10,10 @@ import {
   Filler,
 } from 'chart.js';
 import { Line } from 'react-chartjs-2';
-import zoomPlugin from 'chartjs-plugin-zoom';
 import { usePeerLink } from '../hooks/usePeerLink';
 import referenceCurveData from '../data/referenceCurve.json';
 
-ChartJS.register(LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler, zoomPlugin);
+ChartJS.register(LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler);
 
 // --- Constants ---
 const NUM_POINTS = 33;
@@ -241,7 +240,6 @@ function LiveCapture({ onSaveCurve, onBack }) {
   // Index into `strokes` for showing a single stroke instead of the average.
   // null = show average.
   const [selectedIndex, setSelectedIndex] = useState(null);
-  const timeChartRef = useRef(null);
 
   // Processing state lives in refs to avoid stale closures in the 60 Hz handler
   const procRef = useRef(null);
@@ -992,7 +990,12 @@ function LiveCapture({ onSaveCurve, onBack }) {
         data: strokes.map(s => ({ x: (s.time - t0) / 1000, y: strokeY(s) })),
         spanGaps: true,
         borderColor: '#667eea',
-        backgroundColor: (ctx) => ctx.dataIndex === selectedIndex ? '#ef4444' : '#667eea',
+        backgroundColor: (ctx) => {
+          if (ctx.dataIndex === selectedIndex) return '#ef4444';
+          const s = strokes[ctx.dataIndex];
+          const inRange = !selection || (s && s.time >= selection.min && s.time <= selection.max);
+          return inRange ? '#667eea' : 'rgba(102, 126, 234, 0.25)';
+        },
         borderWidth: 1.5,
         pointRadius: (ctx) => ctx.dataIndex === selectedIndex ? 6 : 2.5,
         pointHoverRadius: 6,
@@ -1000,7 +1003,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
         fill: false,
       }],
     };
-  }, [strokes, t0, selectedIndex, hasGPSAnchoring]);
+  }, [strokes, t0, selectedIndex, selection, hasGPSAnchoring]);
 
   const timeChartOptions = useMemo(() => ({
     responsive: true,
@@ -1013,27 +1016,10 @@ function LiveCapture({ onSaveCurve, onBack }) {
       legend: { display: false },
       title: {
         display: true,
-        text: 'Click a stroke to inspect • drag to select a range',
+        text: 'Tap a stroke to inspect • use the slider to select a range',
         font: { size: 13, weight: 'normal' },
       },
       tooltip: { enabled: false },
-      zoom: {
-        zoom: {
-          drag: {
-            enabled: true,
-            backgroundColor: 'rgba(102, 126, 234, 0.2)',
-            borderColor: 'rgba(102, 126, 234, 0.6)',
-            borderWidth: 1,
-          },
-          mode: 'x',
-          onZoomComplete: ({ chart }) => {
-            const { min, max } = chart.scales.x;
-            // x is in seconds since first stroke; selection is in absolute ms.
-            setSelection({ min: t0 + min * 1000, max: t0 + max * 1000 });
-          },
-        },
-        pan: { enabled: false },
-      },
     },
     scales: {
       x: {
@@ -1051,11 +1037,11 @@ function LiveCapture({ onSaveCurve, onBack }) {
           : undefined,
       },
     },
-  }), [t0, hasGPSAnchoring]);
+  }), [hasGPSAnchoring]);
 
   const resetSelection = () => {
     setSelection(null);
-    timeChartRef.current?.resetZoom();
+    setSelectedIndex(null);
   };
 
   // Prev/next step through strokes — when a range is selected, restrict to it.
@@ -1286,10 +1272,60 @@ function LiveCapture({ onSaveCurve, onBack }) {
   // The stroke inspector is available after a session ends and, for a coach,
   // while paused mid-session.
   const showStrokeInspector = (!isLive || isPaused) && strokes.length > 1;
+
+  // Two-thumb range slider, in stroke-index space. Thumb positions are derived
+  // from `selection` (which is in stroke-time ms) so there's a single source of
+  // truth; dragging a thumb writes selection back. Touch-friendly, unlike the
+  // old mouse-only drag-to-zoom.
+  const lastIdx = Math.max(0, strokes.length - 1);
+  let rangeLo = 0;
+  let rangeHi = lastIdx;
+  if (selection) {
+    const lo = strokes.findIndex(s => s.time >= selection.min);
+    rangeLo = lo < 0 ? 0 : lo;
+    for (let i = lastIdx; i >= 0; i--) {
+      if (strokes[i] && strokes[i].time <= selection.max) { rangeHi = i; break; }
+    }
+  }
+  const applyRange = (lo, hi) => {
+    const a = Math.max(0, Math.min(lo, hi));
+    const b = Math.min(lastIdx, Math.max(lo, hi));
+    setSelection(a <= 0 && b >= lastIdx ? null : { min: strokes[a].time, max: strokes[b].time });
+    setSelectedIndex(null);
+  };
+  const loPct = lastIdx > 0 ? (rangeLo / lastIdx) * 100 : 0;
+  const hiPct = lastIdx > 0 ? (rangeHi / lastIdx) * 100 : 100;
+
   const timeChartView = showStrokeInspector && (
     <div className="live-time-chart">
       <div className="live-time-chart-wrapper">
-        <Line ref={timeChartRef} data={timeChartData} options={timeChartOptions} />
+        <Line data={timeChartData} options={timeChartOptions} />
+      </div>
+      <div className="live-range-slider">
+        <div className="live-range-track" />
+        <div className="live-range-fill" style={{ left: `${loPct}%`, right: `${100 - hiPct}%` }} />
+        <input
+          className="live-range-input live-range-lo"
+          type="range"
+          min={0}
+          max={lastIdx}
+          step={1}
+          value={rangeLo}
+          /* Raise above the high thumb when stuck at the top end so it stays grabbable. */
+          style={rangeLo >= lastIdx ? { zIndex: 5 } : undefined}
+          onChange={(e) => applyRange(Math.min(+e.target.value, rangeHi), rangeHi)}
+          aria-label="Range start stroke"
+        />
+        <input
+          className="live-range-input live-range-hi"
+          type="range"
+          min={0}
+          max={lastIdx}
+          step={1}
+          value={rangeHi}
+          onChange={(e) => applyRange(rangeLo, Math.max(+e.target.value, rangeLo))}
+          aria-label="Range end stroke"
+        />
       </div>
       <div className="live-time-chart-footer">
         <span>

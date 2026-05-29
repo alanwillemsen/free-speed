@@ -1332,6 +1332,84 @@ html.live-mode body {
   height: 140px;
 }
 
+/* Two-thumb range slider (touch-friendly stroke-range selector). Two native
+   range inputs overlap a shared track; only the thumbs receive pointer events. */
+.live-range-slider {
+  position: relative;
+  height: 28px;
+  margin: 0.35rem 0.5rem 0.1rem;
+}
+
+.live-range-track,
+.live-range-fill {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 4px;
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+.live-range-track {
+  left: 0;
+  right: 0;
+  background: #e2e8f0;
+}
+
+.live-range-fill {
+  background: #667eea;
+}
+
+.live-range-input {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 100%;
+  height: 24px;
+  margin: 0;
+  background: none;
+  pointer-events: none; /* re-enabled on the thumb only */
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.live-range-lo { z-index: 3; }
+.live-range-hi { z-index: 4; }
+
+.live-range-input::-webkit-slider-runnable-track {
+  background: transparent;
+  height: 24px;
+}
+
+.live-range-input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  pointer-events: auto;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #667eea;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+}
+
+.live-range-input::-moz-range-track {
+  background: transparent;
+  height: 24px;
+}
+
+.live-range-input::-moz-range-thumb {
+  pointer-events: auto;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #667eea;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+}
+
 .live-time-chart-footer {
   display: flex;
   align-items: center;
