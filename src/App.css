@@ -1291,8 +1291,10 @@ html.live-mode body {
   margin-top: 0.1rem;
 }
 
-.accel-pos { color: #16a34a; }
-.accel-neg { color: #dc2626; }
+.live-split-value {
+  font-size: 1.5rem;
+  font-variant-numeric: tabular-nums;
+}
 
 .live-chart-container {
   flex: 1;

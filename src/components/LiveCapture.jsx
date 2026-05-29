@@ -208,7 +208,6 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const [strokeCount, setStrokeCount] = useState(0);
   const [lastStroke, setLastStroke] = useState(null);
   const [avgCurve, setAvgCurve] = useState(null);
-  const [currentAccel, setCurrentAccel] = useState(0);
   const [calibrationStatus, setCalibrationStatus] = useState('idle'); // idle | calibrating | detected
   const [detectedOrientation, setDetectedOrientation] = useState(null);
   const [gpsStatus, setGpsStatus] = useState('idle'); // idle | requesting | active | unavailable
@@ -436,7 +435,6 @@ function LiveCapture({ onSaveCurve, onBack }) {
     setStrokeCount(0);
     setLastStroke(null);
     setAvgCurve(null);
-    setCurrentAccel(0);
     setCalibrationStatus('calibrating');
     setDetectedOrientation(null);
     setHasGPSAnchoring(false);
@@ -618,7 +616,6 @@ function LiveCapture({ onSaveCurve, onBack }) {
       setStrokeCount(proc.strokeCount);
       setLastStroke(proc.lastStroke);
       setAvgCurve(proc.avgCurve);
-      setCurrentAccel(proc.filteredAccel);
       setHasGPSAnchoring(proc.hasGPS);
 
       if (proc.calibration.done && proc.detectedOrientation) {
@@ -661,7 +658,6 @@ function LiveCapture({ onSaveCurve, onBack }) {
     setStrokeCount(0);
     setLastStroke(null);
     setAvgCurve(null);
-    setCurrentAccel(0);
     setCalibrationStatus('calibrating');
     setDetectedOrientation(null);
     setHasGPSAnchoring(false);
@@ -798,7 +794,6 @@ function LiveCapture({ onSaveCurve, onBack }) {
     setStrokeCount(proc.strokeCount);
     setLastStroke(proc.lastStroke);
     setAvgCurve(proc.avgCurve);
-    setCurrentAccel(proc.filteredAccel);
     setHasGPSAnchoring(proc.hasGPS);
     if (proc.detectedOrientation) {
       setCalibrationStatus('detected');
@@ -1185,6 +1180,17 @@ function LiveCapture({ onSaveCurve, onBack }) {
     </div>
   );
 
+  // Boat speed as a 500m split. Live: the latest stroke; while inspecting a
+  // single stroke, that stroke. Only meaningful when GPS-anchored (real m/s);
+  // otherwise the curve is a relative shape, so we show no split.
+  const splitCurve = individualStroke
+    ? individualStroke.curve
+    : (isLive ? lastStroke : displayAvgCurve);
+  const splitAvg = splitCurve && splitCurve.length
+    ? splitCurve.reduce((a, b) => a + b, 0) / splitCurve.length
+    : 0;
+  const splitText = hasGPSAnchoring && splitAvg > 0 ? formatSplit(500 / splitAvg) : '—';
+
   const statsView = (
     <div className="live-stats">
       <div className="live-stat">
@@ -1195,12 +1201,10 @@ function LiveCapture({ onSaveCurve, onBack }) {
         <span className="live-stat-value">{strokeCount}</span>
         <span className="live-stat-label">strokes</span>
       </div>
-      {isLive && (
+      {(isLive || splitCurve) && (
         <div className="live-stat">
-          <span className={`live-stat-value ${currentAccel >= 0 ? 'accel-pos' : 'accel-neg'}`}>
-            {currentAccel.toFixed(1)}
-          </span>
-          <span className="live-stat-label">m/s²</span>
+          <span className="live-stat-value live-split-value">{splitText}</span>
+          <span className="live-stat-label">/500m</span>
         </div>
       )}
       <div className="live-stat">
