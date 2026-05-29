@@ -11,6 +11,7 @@ import {
 } from 'chart.js';
 import { Line } from 'react-chartjs-2';
 import zoomPlugin from 'chartjs-plugin-zoom';
+import { usePeerLink } from '../hooks/usePeerLink';
 import referenceCurveData from '../data/referenceCurve.json';
 
 ChartJS.register(LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler, zoomPlugin);
@@ -24,6 +25,7 @@ const MAX_STROKE_MS = 4000;
 const MAX_STROKES = 500;          // Rolling window for averaging
 const UI_UPDATE_MS = 250;
 const CALIBRATION_MS = 3000;      // Auto-orientation calibration window
+const SEND_BATCH_MS = 100;        // Batch outgoing samples this often when coach-linked
 
 const PHASE_TIMES = Array.from({ length: NUM_POINTS }, (_, i) => i / (NUM_POINTS - 1));
 const REF_SPEEDS = referenceCurveData.speeds;
@@ -192,6 +194,12 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const [isCapturing, setIsCapturing] = useState(false);
   const [sensorStatus, setSensorStatus] = useState('checking');
 
+  // Coach link: 'rower' = this phone is mounted in the boat and (optionally)
+  // streams to a coach; 'coach' = this phone watches a rower's stream and runs
+  // the same processing pipeline on the received samples.
+  const [linkRole, setLinkRole] = useState('rower');
+  const [isWatching, setIsWatching] = useState(false); // coach is receiving a live session
+
   // UI state (synced from refs periodically during capture)
   const [strokeRate, setStrokeRate] = useState(0);
   const [strokeCount, setStrokeCount] = useState(0);
@@ -222,6 +230,9 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const wakeLockRef = useRef(null);
   const recordingRef = useRef(null);
   const fileInputRef = useRef(null);
+  const sendBufferRef = useRef({ motion: [], orientation: [], gps: [] });
+  const sendIntervalRef = useRef(null);
+  const calibSentRef = useRef(false); // rower: calib message sent to coach once
 
   // Detect sensor availability
   useEffect(() => {
@@ -269,6 +280,10 @@ function LiveCapture({ onSaveCurve, onBack }) {
       if (a && a.x != null) { sample.ax = a.x; sample.ay = a.y; sample.az = a.z; }
       if (ag && ag.x != null) { sample.axg = ag.x; sample.ayg = ag.y; sample.azg = ag.z; }
       rec.motion.push(sample);
+      // Stream to a connected coach. Guard on nowOverride so coach-fed samples
+      // (replay / received stream) never get re-buffered; the flush interval
+      // drops the buffer when no peer is connected.
+      if (nowOverride == null) sendBufferRef.current.motion.push(sample);
     }
 
     // --- Gravity compensation ---
@@ -378,72 +393,33 @@ function LiveCapture({ onSaveCurve, onBack }) {
     }
   });
 
-  // Attach / detach the devicemotion listener
-  useEffect(() => {
-    if (!isCapturing) return;
-    const handler = (e) => handleMotion.current(e);
-    window.addEventListener('devicemotion', handler);
-    return () => window.removeEventListener('devicemotion', handler);
-  }, [isCapturing]);
+  // --- Coach watch lifecycle (coach side) ---
+  // A fresh processing pipeline that consumes the rower's streamed samples
+  // instead of local sensors. Mirrors startCapture's proc init.
+  const makeProc = (startTime) => ({
+    filteredAccel: 0,
+    strokeDetect: 0,
+    prevStrokeDetect: 0,
+    buffer: [],
+    lastBoundaryTime: 0,
+    boundaryTimes: [],
+    strokes: [],
+    strokeCount: 0,
+    strokeRate: 0,
+    lastStroke: null,
+    avgCurve: null,
+    hasGPS: false,
+    detectedOrientation: null,
+    calibration: { startTime, samples: { x: [], y: [], z: [] }, done: false },
+  });
 
-  // Attach / detach the deviceorientation listener (for gravity compensation)
-  useEffect(() => {
-    if (!isCapturing) return;
-    const handler = (e) => {
-      if (e.beta != null) {
-        orientationRef.current = { beta: e.beta, gamma: e.gamma };
-        const rec = recordingRef.current;
-        if (rec) rec.orientation.push({ t: performance.now(), beta: e.beta, gamma: e.gamma });
-      }
-    };
-    window.addEventListener('deviceorientation', handler);
-    return () => window.removeEventListener('deviceorientation', handler);
-  }, [isCapturing]);
-
-  // Periodic UI refresh during capture (avoids 60 Hz React renders)
-  useEffect(() => {
-    if (!isCapturing) return;
-    const id = setInterval(() => {
-      const proc = procRef.current;
-      if (!proc) return;
-      setStrokeRate(proc.strokeRate);
-      setStrokeCount(proc.strokeCount);
-      setLastStroke(proc.lastStroke);
-      setAvgCurve(proc.avgCurve);
-      setCurrentAccel(proc.filteredAccel);
-      setHasGPSAnchoring(proc.hasGPS);
-
-      if (proc.calibration.done && proc.detectedOrientation) {
-        setCalibrationStatus('detected');
-        setDetectedOrientation(proc.detectedOrientation);
-      } else if (!proc.calibration.done) {
-        setCalibrationStatus('calibrating');
-      }
-    }, UI_UPDATE_MS);
-    return () => clearInterval(id);
-  }, [isCapturing]);
-
-  const startCapture = async () => {
-    procRef.current = {
-      filteredAccel: 0,
-      strokeDetect: 0,
-      prevStrokeDetect: 0,
-      buffer: [],
-      lastBoundaryTime: 0,
-      boundaryTimes: [],
-      strokes: [],
-      strokeCount: 0,
-      strokeRate: 0,
-      lastStroke: null,
-      avgCurve: null,
-      hasGPS: false,
-      detectedOrientation: null,
-      calibration: {
-        startTime: performance.now(),
-        samples: { x: [], y: [], z: [] },
-        done: false,
-      },
-    };
+  const startWatch = () => {
+    // startTime null → set from the first received motion sample, so coach-side
+    // calibration spans the right window if the rower wasn't calibrated yet.
+    procRef.current = makeProc(null);
+    axisRef.current = { axis: 'y', sign: 1 };
+    orientationRef.current = { beta: 0, gamma: 0 };
+    gpsRef.current.speeds = [];
     recordingRef.current = {
       version: 1,
       startedAt: new Date().toISOString(),
@@ -464,7 +440,209 @@ function LiveCapture({ onSaveCurve, onBack }) {
     setStrokes([]);
     setSelection(null);
     setSelectedIndex(null);
+    setIsWatching(true);
+  };
+
+  const stopWatch = () => {
+    setIsWatching(false);
+    const proc = procRef.current;
+    if (proc) {
+      setStrokeRate(proc.strokeRate);
+      setStrokeCount(proc.strokeCount);
+      setLastStroke(proc.lastStroke);
+      setAvgCurve(proc.avgCurve);
+      setHasGPSAnchoring(proc.hasGPS);
+      setStrokes([...proc.strokes]);
+      setSelection(null);
+      setSelectedIndex(null);
+    }
+    const rec = recordingRef.current;
+    if (rec && rec.motion.length > 0) setHasRecording(true);
+  };
+
+  // --- Peer link (shared hook) ---
+  // Coach consumes the stream; rower resends capture state + calibration to a
+  // freshly-connected coach so it can catch up mid-session.
+  const handlePeerData = (msg) => {
+    if (linkRole !== 'coach') return;
+    const proc = procRef.current;
+    switch (msg.type) {
+      case 'capture':
+        if (msg.active) startWatch();
+        else stopWatch();
+        break;
+      case 'calib':
+        if (proc && msg.axis) {
+          axisRef.current = { axis: msg.axis, sign: msg.sign ?? 1 };
+          proc.calibration.done = true;
+          proc.detectedOrientation = { axis: msg.axis, sign: msg.sign ?? 1 };
+        }
+        break;
+      case 'motion':
+        if (proc && Array.isArray(msg.samples)) {
+          for (const s of msg.samples) {
+            if (proc.calibration.startTime == null) proc.calibration.startTime = s.t;
+            const fakeEvent = {
+              acceleration: s.ax != null ? { x: s.ax, y: s.ay, z: s.az } : null,
+              accelerationIncludingGravity: s.axg != null
+                ? { x: s.axg, y: s.ayg, z: s.azg }
+                : null,
+            };
+            // handleMotion records into recordingRef itself (with t = s.t).
+            handleMotion.current(fakeEvent, s.t);
+          }
+        }
+        break;
+      case 'orientation':
+        if (Array.isArray(msg.samples)) {
+          const rec = recordingRef.current;
+          for (const s of msg.samples) {
+            if (s.beta != null) orientationRef.current = { beta: s.beta, gamma: s.gamma };
+            if (rec) rec.orientation.push(s);
+          }
+        }
+        break;
+      case 'gps':
+        if (Array.isArray(msg.samples)) {
+          const rec = recordingRef.current;
+          for (const s of msg.samples) {
+            gpsRef.current.speeds.push({ time: s.t, speed: s.speed });
+            if (rec) rec.gps.push(s);
+          }
+          const speeds = gpsRef.current.speeds;
+          if (speeds.length) {
+            const cutoff = speeds[speeds.length - 1].time - 30000;
+            gpsRef.current.speeds = speeds.filter(g => g.time > cutoff);
+          }
+        }
+        break;
+      default:
+        break;
+    }
+  };
+
+  const handlePeerOpen = (conn) => {
+    // Rower: catch a coach up if it joins mid-session.
+    if (linkRole !== 'rower' || !isCapturing) return;
+    try {
+      conn.send({ type: 'capture', active: true });
+      const proc = procRef.current;
+      if (proc?.calibration?.done && proc.detectedOrientation) {
+        conn.send({
+          type: 'calib',
+          axis: proc.detectedOrientation.axis,
+          sign: proc.detectedOrientation.sign,
+        });
+        calibSentRef.current = true;
+      }
+    } catch { /* ignore */ }
+  };
+
+  const link = usePeerLink({
+    page: 'live',
+    onData: handlePeerData,
+    onOpen: handlePeerOpen,
+    onJoin: () => setLinkRole('coach'),
+  });
+  // Stable references (useCallback in the hook) — safe to use in effect deps.
+  const { isOpen: linkIsOpen, sendData: linkSendData, sendBatch: linkSendBatch } = link;
+
+  // Attach / detach the devicemotion listener (rower only — coach never uses
+  // its own sensors; it feeds the received stream into handleMotion directly).
+  useEffect(() => {
+    if (!isCapturing) return;
+    const handler = (e) => handleMotion.current(e);
+    window.addEventListener('devicemotion', handler);
+    return () => window.removeEventListener('devicemotion', handler);
+  }, [isCapturing]);
+
+  // Attach / detach the deviceorientation listener (for gravity compensation)
+  useEffect(() => {
+    if (!isCapturing) return;
+    const handler = (e) => {
+      if (e.beta != null) {
+        const t = performance.now();
+        orientationRef.current = { beta: e.beta, gamma: e.gamma };
+        const sample = { t, beta: e.beta, gamma: e.gamma };
+        const rec = recordingRef.current;
+        if (rec) rec.orientation.push(sample);
+        sendBufferRef.current.orientation.push(sample);
+      }
+    };
+    window.addEventListener('deviceorientation', handler);
+    return () => window.removeEventListener('deviceorientation', handler);
+  }, [isCapturing]);
+
+  // Periodic UI refresh during capture or while watching a coach stream
+  // (avoids 60 Hz React renders)
+  useEffect(() => {
+    if (!isCapturing && !isWatching) return;
+    const id = setInterval(() => {
+      const proc = procRef.current;
+      if (!proc) return;
+      setStrokeRate(proc.strokeRate);
+      setStrokeCount(proc.strokeCount);
+      setLastStroke(proc.lastStroke);
+      setAvgCurve(proc.avgCurve);
+      setCurrentAccel(proc.filteredAccel);
+      setHasGPSAnchoring(proc.hasGPS);
+
+      if (proc.calibration.done && proc.detectedOrientation) {
+        setCalibrationStatus('detected');
+        setDetectedOrientation(proc.detectedOrientation);
+        // Rower: tell the coach which axis we locked onto, once.
+        if (linkRole === 'rower' && linkIsOpen() && !calibSentRef.current) {
+          linkSendData({
+            type: 'calib',
+            axis: proc.detectedOrientation.axis,
+            sign: proc.detectedOrientation.sign,
+          });
+          calibSentRef.current = true;
+        }
+      } else if (!proc.calibration.done) {
+        setCalibrationStatus('calibrating');
+      }
+    }, UI_UPDATE_MS);
+    return () => clearInterval(id);
+  }, [isCapturing, isWatching, linkRole, linkIsOpen, linkSendData]);
+
+  // Clean up the streaming interval on unmount (the peer link self-cleans).
+  useEffect(() => () => {
+    if (sendIntervalRef.current != null) clearInterval(sendIntervalRef.current);
+  }, []);
+
+  const startCapture = async () => {
+    procRef.current = makeProc(performance.now());
+    recordingRef.current = {
+      version: 1,
+      startedAt: new Date().toISOString(),
+      userAgent: navigator.userAgent,
+      motion: [],
+      orientation: [],
+      gps: [],
+    };
+    sendBufferRef.current = { motion: [], orientation: [], gps: [] };
+    calibSentRef.current = false;
+    setStrokeRate(0);
+    setStrokeCount(0);
+    setLastStroke(null);
+    setAvgCurve(null);
+    setCurrentAccel(0);
+    setCalibrationStatus('calibrating');
+    setDetectedOrientation(null);
+    setHasGPSAnchoring(false);
+    setHasRecording(false);
+    setStrokes([]);
+    setSelection(null);
+    setSelectedIndex(null);
     setIsCapturing(true);
+
+    // Tell a connected coach a session is starting, then stream to it.
+    linkSendData({ type: 'capture', active: true });
+    sendIntervalRef.current = setInterval(() => {
+      linkSendBatch(sendBufferRef.current);
+      sendBufferRef.current = { motion: [], orientation: [], gps: [] };
+    }, SEND_BATCH_MS);
 
     // Start GPS tracking
     if ('geolocation' in navigator) {
@@ -479,6 +657,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
             gpsRef.current.speeds = gpsRef.current.speeds.filter(s => s.time > cutoff);
             const rec = recordingRef.current;
             if (rec) rec.gps.push({ t: gpsTime, speed: pos.coords.speed });
+            sendBufferRef.current.gps.push({ t: gpsTime, speed: pos.coords.speed });
           }
           setGpsStatus('active');
         },
@@ -517,6 +696,12 @@ function LiveCapture({ onSaveCurve, onBack }) {
       navigator.geolocation.clearWatch(gpsRef.current.watchId);
       gpsRef.current.watchId = null;
     }
+    // Stop streaming and tell the coach the session ended.
+    if (sendIntervalRef.current != null) {
+      clearInterval(sendIntervalRef.current);
+      sendIntervalRef.current = null;
+    }
+    linkSendData({ type: 'capture', active: false });
     wakeLockRef.current?.release().catch(() => {});
     wakeLockRef.current = null;
     const rec = recordingRef.current;
@@ -540,26 +725,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
   };
 
   const replayRecording = (recording) => {
-    procRef.current = {
-      filteredAccel: 0,
-      strokeDetect: 0,
-      prevStrokeDetect: 0,
-      buffer: [],
-      lastBoundaryTime: 0,
-      boundaryTimes: [],
-      strokes: [],
-      strokeCount: 0,
-      strokeRate: 0,
-      lastStroke: null,
-      avgCurve: null,
-      hasGPS: false,
-      detectedOrientation: null,
-      calibration: {
-        startTime: recording.motion[0]?.t ?? 0,
-        samples: { x: [], y: [], z: [] },
-        done: false,
-      },
-    };
+    procRef.current = makeProc(recording.motion[0]?.t ?? 0);
     gpsRef.current.speeds = [];
     orientationRef.current = { beta: 0, gamma: 0 };
 
@@ -898,35 +1064,207 @@ function LiveCapture({ onSaveCurve, onBack }) {
 
   // --- Render ---
 
-  if (sensorStatus === 'checking') {
-    return (
-      <div className="live-capture">
-        <div className="live-header">
-          <button className="btn btn-secondary btn-sm" onClick={onBack}>← Calculator</button>
-          <h2>Live Stroke Capture</h2>
-        </div>
-        <div className="live-message"><p>Checking sensor availability...</p></div>
-      </div>
-    );
-  }
+  const isLive = isCapturing || isWatching;
+  const gpsActive = gpsStatus === 'active' || hasGPSAnchoring;
 
-  if (sensorStatus === 'unavailable') {
-    return (
-      <div className="live-capture">
-        <div className="live-header">
-          <button className="btn btn-secondary btn-sm" onClick={onBack}>← Calculator</button>
-          <h2>Live Stroke Capture</h2>
+  const peerLabel = ({
+    idle: 'Off',
+    initializing: 'Initializing…',
+    online: linkRole === 'coach' ? 'Ready — connect to the rower' : 'Online — waiting for a coach',
+    connecting: 'Connecting…',
+    connected: 'Connected',
+    error: `Error: ${link.peerError}`,
+  })[link.peerStatus] ?? link.peerStatus;
+
+  const linkPanel = (
+    <div className="live-link">
+      <div className="oar-role-toggle">
+        <label className={linkRole === 'rower' ? 'active' : ''}>
+          <input
+            type="radio"
+            name="live-role"
+            value="rower"
+            checked={linkRole === 'rower'}
+            onChange={() => setLinkRole('rower')}
+            disabled={isCapturing || isWatching}
+          />
+          This phone is in the boat (rower)
+        </label>
+        <label className={linkRole === 'coach' ? 'active' : ''}>
+          <input
+            type="radio"
+            name="live-role"
+            value="coach"
+            checked={linkRole === 'coach'}
+            onChange={() => setLinkRole('coach')}
+            disabled={isCapturing || isWatching}
+          />
+          Watch a rower's phone (coach)
+        </label>
+      </div>
+
+      <p className="oar-status">Coach link: {peerLabel}</p>
+      {!link.hasPeer && (
+        <button className="btn btn-secondary btn-sm" onClick={link.initPeer}>
+          Enable coach link
+        </button>
+      )}
+      {link.hasPeer && (
+        <>
+          <div className="oar-join-card">
+            <div className="oar-short-code">{link.shortCode || '…'}</div>
+            <div className="oar-join-hint">
+              {linkRole === 'rower'
+                ? 'Coach scans this QR or types this code to watch.'
+                : "Scan the rower's QR, or enter the rower's code below."}
+            </div>
+            {link.qrDataUrl && (
+              <img className="oar-qr" src={link.qrDataUrl} alt="Join QR code" />
+            )}
+          </div>
+          <div className="oar-row">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={link.remoteShortCode}
+              onChange={(e) => link.setRemoteShortCode(e.target.value)}
+              placeholder="Other phone's code"
+              disabled={link.peerStatus === 'connected'}
+            />
+            <button
+              className="btn btn-secondary"
+              onClick={() => link.connectToRemote()}
+              disabled={!link.myPeerId || !link.remoteShortCode.trim() || link.peerStatus === 'connected'}
+            >
+              Connect
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+
+  const statsView = (
+    <div className="live-stats">
+      <div className="live-stat">
+        <span className="live-stat-value">{strokeRate || '—'}</span>
+        <span className="live-stat-label">spm</span>
+      </div>
+      <div className="live-stat">
+        <span className="live-stat-value">{strokeCount}</span>
+        <span className="live-stat-label">strokes</span>
+      </div>
+      {isLive && (
+        <div className="live-stat">
+          <span className={`live-stat-value ${currentAccel >= 0 ? 'accel-pos' : 'accel-neg'}`}>
+            {currentAccel.toFixed(1)}
+          </span>
+          <span className="live-stat-label">m/s²</span>
         </div>
-        <div className="live-message">
-          <h3>Sensors Not Available</h3>
-          <p>
-            This feature requires a device with an accelerometer.
-            Open this page on your phone or tablet and mount it in the boat.
-          </p>
+      )}
+      <div className="live-stat">
+        <span className={`live-stat-value live-gps-value ${gpsActive ? 'gps-active' : ''}`}>
+          {gpsActive ? 'GPS' : gpsStatus === 'requesting' ? '...' : '—'}
+        </span>
+        <span className="live-stat-label">
+          {hasGPSAnchoring
+            ? 'anchored'
+            : gpsStatus === 'active' ? 'waiting'
+            : gpsStatus === 'unavailable' ? 'no gps' : 'gps'}
+        </span>
+      </div>
+    </div>
+  );
+
+  const chartView = (
+    <div className="live-chart-container">
+      <div className="live-chart-wrapper">
+        <Line data={chartData} options={chartOptions} />
+      </div>
+      {!avgCurve && isLive && calibrationStatus === 'calibrating' && (
+        <div className="live-chart-overlay">
+          <span className="live-calibrating">
+            {linkRole === 'coach' ? 'Receiving — detecting orientation…' : 'Detecting orientation — row a few strokes...'}
+          </span>
+        </div>
+      )}
+      {!avgCurve && isLive && calibrationStatus !== 'calibrating' && (
+        <div className="live-chart-overlay">Waiting for strokes...</div>
+      )}
+      {!avgCurve && !isLive && strokeCount === 0 && (
+        <div className="live-chart-overlay">
+          {linkRole === 'coach' ? 'Waiting for the rower to start…' : 'Tap Start Capture, then row'}
+        </div>
+      )}
+    </div>
+  );
+
+  const timeChartView = !isLive && strokes.length > 1 && (
+    <div className="live-time-chart">
+      <div className="live-time-chart-wrapper">
+        <Line ref={timeChartRef} data={timeChartData} options={timeChartOptions} />
+      </div>
+      <div className="live-time-chart-footer">
+        <span>
+          {individualStroke
+            ? `Viewing stroke #${selectedIndex + 1} of ${strokes.length}`
+            : selection
+              ? `${displayCount} of ${strokes.length} strokes selected`
+              : `All ${strokes.length} strokes`}
+        </span>
+        <div className="live-time-chart-actions">
+          <button className="btn btn-secondary btn-sm" onClick={() => stepStroke(-1)} disabled={strokes.length === 0}>
+            ← Prev
+          </button>
+          <button className="btn btn-secondary btn-sm" onClick={() => stepStroke(1)} disabled={strokes.length === 0}>
+            Next →
+          </button>
+          {individualStroke && (
+            <button className="btn btn-secondary btn-sm" onClick={() => setSelectedIndex(null)}>
+              Show average
+            </button>
+          )}
+          {selection && (
+            <button className="btn btn-secondary btn-sm" onClick={resetSelection}>
+              Reset range
+            </button>
+          )}
         </div>
       </div>
-    );
-  }
+    </div>
+  );
+
+  const axisConfigView = (
+    <div className="live-axis-config">
+      {calibrationStatus === 'detected' && detectedOrientation && (
+        <span className="live-orientation-detected">
+          {orientationLabel(detectedOrientation.axis, detectedOrientation.sign)}
+        </span>
+      )}
+      {calibrationStatus === 'calibrating' && isLive && (
+        <span className="live-orientation-detecting">Detecting orientation...</span>
+      )}
+      {calibrationStatus === 'idle' && (
+        <span className="live-orientation-idle">Orientation auto-detected on capture</span>
+      )}
+    </div>
+  );
+
+  // Save / download (shared by both roles once a session has ended).
+  const sessionActions = (
+    <>
+      {avgCurve && (
+        <button className="btn btn-primary btn-large" onClick={handleSave}>
+          Save & Open in Calculator
+        </button>
+      )}
+      {hasRecording && (
+        <button className="btn btn-secondary btn-large" onClick={downloadRecording}>
+          Download recording
+        </button>
+      )}
+    </>
+  );
 
   return (
     <div className="live-capture">
@@ -935,178 +1273,106 @@ function LiveCapture({ onSaveCurve, onBack }) {
         <h2>Live Stroke Capture</h2>
       </div>
 
-      {sensorStatus === 'permission_needed' && (
-        <div className="live-permission">
-          <p>Motion sensor access is required to capture stroke data.</p>
-          <button className="btn btn-primary" onClick={requestPermission}>
-            Grant Sensor Access
-          </button>
-        </div>
-      )}
+      {linkPanel}
 
-      {sensorStatus === 'denied' && (
-        <div className="live-message">
-          <h3>Permission Denied</h3>
-          <p>Sensor access was denied. Allow motion access in your browser settings and reload the page.</p>
-        </div>
-      )}
-
-      {sensorStatus === 'available' && (
+      {linkRole === 'coach' ? (
         <>
           <div className="live-guide">
-            Mount your phone anywhere stable in the boat — flat, upright, or on
-            its side. Orientation is detected automatically; just start rowing.
+            {link.peerStatus === 'connected'
+              ? (isWatching
+                  ? "Receiving live data from the rower's phone."
+                  : 'Connected. Waiting for the rower to start capturing…')
+              : "Connect to the rower's phone above to watch their live stroke data."}
           </div>
-
-          <div className="live-stats">
-            <div className="live-stat">
-              <span className="live-stat-value">{strokeRate || '—'}</span>
-              <span className="live-stat-label">spm</span>
-            </div>
-            <div className="live-stat">
-              <span className="live-stat-value">{strokeCount}</span>
-              <span className="live-stat-label">strokes</span>
-            </div>
-            {isCapturing && (
-              <div className="live-stat">
-                <span className={`live-stat-value ${currentAccel >= 0 ? 'accel-pos' : 'accel-neg'}`}>
-                  {currentAccel.toFixed(1)}
-                </span>
-                <span className="live-stat-label">m/s²</span>
-              </div>
-            )}
-            <div className="live-stat">
-              <span className={`live-stat-value live-gps-value ${gpsStatus === 'active' ? 'gps-active' : ''}`}>
-                {gpsStatus === 'active' ? 'GPS' : gpsStatus === 'requesting' ? '...' : '—'}
-              </span>
-              <span className="live-stat-label">
-                {gpsStatus === 'active'
-                  ? (hasGPSAnchoring ? 'anchored' : 'waiting')
-                  : gpsStatus === 'unavailable' ? 'no gps' : 'gps'}
-              </span>
-            </div>
+          {statsView}
+          {chartView}
+          {timeChartView}
+          {axisConfigView}
+          <div className="live-actions">
+            {!isWatching && sessionActions}
           </div>
+        </>
+      ) : (
+        <>
+          {sensorStatus === 'checking' && (
+            <div className="live-message"><p>Checking sensor availability...</p></div>
+          )}
 
-          <div className="live-chart-container">
-            <div className="live-chart-wrapper">
-              <Line data={chartData} options={chartOptions} />
-            </div>
-            {!avgCurve && isCapturing && calibrationStatus === 'calibrating' && (
-              <div className="live-chart-overlay">
-                <span className="live-calibrating">Detecting orientation — row a few strokes...</span>
-              </div>
-            )}
-            {!avgCurve && isCapturing && calibrationStatus !== 'calibrating' && (
-              <div className="live-chart-overlay">Waiting for strokes...</div>
-            )}
-            {!avgCurve && !isCapturing && strokeCount === 0 && (
-              <div className="live-chart-overlay">Tap Start Capture, then row</div>
-            )}
-          </div>
-
-          {!isCapturing && strokes.length > 1 && (
-            <div className="live-time-chart">
-              <div className="live-time-chart-wrapper">
-                <Line ref={timeChartRef} data={timeChartData} options={timeChartOptions} />
-              </div>
-              <div className="live-time-chart-footer">
-                <span>
-                  {individualStroke
-                    ? `Viewing stroke #${selectedIndex + 1} of ${strokes.length}`
-                    : selection
-                      ? `${displayCount} of ${strokes.length} strokes selected`
-                      : `All ${strokes.length} strokes`}
-                </span>
-                <div className="live-time-chart-actions">
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => stepStroke(-1)}
-                    disabled={strokes.length === 0}
-                  >
-                    ← Prev
-                  </button>
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => stepStroke(1)}
-                    disabled={strokes.length === 0}
-                  >
-                    Next →
-                  </button>
-                  {individualStroke && (
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => setSelectedIndex(null)}
-                    >
-                      Show average
-                    </button>
-                  )}
-                  {selection && (
-                    <button className="btn btn-secondary btn-sm" onClick={resetSelection}>
-                      Reset range
-                    </button>
-                  )}
-                </div>
-              </div>
+          {sensorStatus === 'unavailable' && (
+            <div className="live-message">
+              <h3>Sensors Not Available</h3>
+              <p>
+                This feature requires a device with an accelerometer.
+                Open this page on your phone or tablet and mount it in the boat.
+                {' '}(You can still switch to coach mode above to watch another phone.)
+              </p>
             </div>
           )}
 
-          <div className="live-axis-config">
-            {calibrationStatus === 'detected' && detectedOrientation && (
-              <span className="live-orientation-detected">
-                {orientationLabel(detectedOrientation.axis, detectedOrientation.sign)}
-              </span>
-            )}
-            {calibrationStatus === 'calibrating' && isCapturing && (
-              <span className="live-orientation-detecting">Detecting orientation...</span>
-            )}
-            {calibrationStatus === 'idle' && (
-              <span className="live-orientation-idle">Orientation auto-detected on capture</span>
-            )}
-          </div>
+          {sensorStatus === 'permission_needed' && (
+            <div className="live-permission">
+              <p>Motion sensor access is required to capture stroke data.</p>
+              <button className="btn btn-primary" onClick={requestPermission}>
+                Grant Sensor Access
+              </button>
+            </div>
+          )}
 
-          <div className="live-actions">
-            {!isCapturing ? (
-              <button className="btn btn-primary btn-large live-start-btn" onClick={startCapture}>
-                {strokeCount > 0 ? 'Restart Capture' : 'Start Capture'}
-              </button>
-            ) : (
-              <button className="btn btn-large live-stop-btn" onClick={stopCapture}>
-                Stop Capture
-              </button>
-            )}
-            {!isCapturing && avgCurve && (
-              <button className="btn btn-primary btn-large" onClick={handleSave}>
-                Save & Open in Calculator
-              </button>
-            )}
-            {!isCapturing && hasRecording && (
-              <button className="btn btn-secondary btn-large" onClick={downloadRecording}>
-                Download recording
-              </button>
-            )}
-            {!isCapturing && (
-              <>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="application/json,.json"
-                  style={{ display: 'none' }}
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) handleLoadRecording(f);
-                    e.target.value = '';
-                  }}
-                />
-                <button
-                  className="btn btn-secondary btn-large"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isReplaying}
-                >
-                  {isReplaying ? 'Replaying…' : 'Load recording'}
-                </button>
-              </>
-            )}
-          </div>
+          {sensorStatus === 'denied' && (
+            <div className="live-message">
+              <h3>Permission Denied</h3>
+              <p>Sensor access was denied. Allow motion access in your browser settings and reload the page.</p>
+            </div>
+          )}
+
+          {sensorStatus === 'available' && (
+            <>
+              <div className="live-guide">
+                Mount your phone anywhere stable in the boat — flat, upright, or on
+                its side. Orientation is detected automatically; just start rowing.
+              </div>
+
+              {statsView}
+              {chartView}
+              {timeChartView}
+              {axisConfigView}
+
+              <div className="live-actions">
+                {!isCapturing ? (
+                  <button className="btn btn-primary btn-large live-start-btn" onClick={startCapture}>
+                    {strokeCount > 0 ? 'Restart Capture' : 'Start Capture'}
+                  </button>
+                ) : (
+                  <button className="btn btn-large live-stop-btn" onClick={stopCapture}>
+                    Stop Capture
+                  </button>
+                )}
+                {!isCapturing && sessionActions}
+                {!isCapturing && (
+                  <>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="application/json,.json"
+                      style={{ display: 'none' }}
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) handleLoadRecording(f);
+                        e.target.value = '';
+                      }}
+                    />
+                    <button
+                      className="btn btn-secondary btn-large"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isReplaying}
+                    >
+                      {isReplaying ? 'Replaying…' : 'Load recording'}
+                    </button>
+                  </>
+                )}
+              </div>
+            </>
+          )}
         </>
       )}
     </div>

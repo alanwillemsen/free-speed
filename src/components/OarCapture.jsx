@@ -1,6 +1,5 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import Peer from 'peerjs';
-import QRCode from 'qrcode';
+import { useState, useRef, useEffect, useMemo } from 'react';
+import { usePeerLink } from '../hooks/usePeerLink';
 import {
   Chart as ChartJS,
   LinearScale,
@@ -33,26 +32,6 @@ const PREVIEW_UPDATE_MS = 250;
 const RECORDING_VERSION = 1;
 const UI_UPDATE_MS = 250;
 const SEND_BATCH_MS = 100; // batch outgoing samples this often to keep DC happy
-const PEER_ID_PREFIX = 'freespeed-';
-const PEER_ID_RETRIES = 5;
-
-function makeShortCode() {
-  // 5-digit numeric code: easy to read out loud, easy to type.
-  return String(Math.floor(10000 + Math.random() * 90000));
-}
-
-function shortFromPeerId(peerId) {
-  return peerId?.startsWith(PEER_ID_PREFIX) ? peerId.slice(PEER_ID_PREFIX.length) : peerId;
-}
-
-function parseJoinFromHash() {
-  const m = window.location.hash.match(/[?&]join=([A-Za-z0-9-]+)/);
-  return m ? m[1] : null;
-}
-
-function buildJoinUrl(shortCode) {
-  return `${window.location.origin}${window.location.pathname}#oar?join=${shortCode}`;
-}
 
 function newRecording(role) {
   return {
@@ -101,15 +80,6 @@ function OarCapture({ onBack }) {
   const [isCapturing, setIsCapturing] = useState(false);
   const [hasRecording, setHasRecording] = useState(false);
 
-  // --- Peer state ---
-  const [myPeerId, setMyPeerId] = useState('');
-  const [remoteShortCode, setRemoteShortCode] = useState('');
-  const [peerStatus, setPeerStatus] = useState('idle'); // idle | initializing | online | connecting | connected | error
-  const [peerError, setPeerError] = useState('');
-  const [lastPing, setLastPing] = useState(null); // ms round-trip
-  const [qrDataUrl, setQrDataUrl] = useState('');
-  const autoConnectOnReadyRef = useRef(false);
-
   // --- Live counters (refreshed periodically from refs to avoid re-rendering per sample) ---
   const [counts, setCounts] = useState({
     motion: 0, orientation: 0, gps: 0,
@@ -118,13 +88,10 @@ function OarCapture({ onBack }) {
 
   // --- Persistent refs ---
   const recordingRef = useRef(null);
-  const peerRef = useRef(null);
-  const connRef = useRef(null);
   const gpsWatchRef = useRef(null);
   const wakeLockRef = useRef(null);
   const sendBufferRef = useRef({ motion: [], orientation: [], gps: [] });
   const sendIntervalRef = useRef(null);
-  const pingStartRef = useRef(null);
 
   // Rolling rotation-rate preview buffers (own and peer). Trimmed periodically
   // by the UI refresh interval, not on every push, to keep the motion handler
@@ -160,164 +127,59 @@ function OarCapture({ onBack }) {
     }
   };
 
-  // ---------- Peer connection (peerjs) ----------
-  const setupConnHandlers = useCallback((conn) => {
-    connRef.current = conn;
-    conn.on('open', () => {
-      setPeerStatus('connected');
-      // Send a hello so the peer knows our role and startup time.
-      try {
-        conn.send({
-          type: 'hello',
-          role,
-          startedAtWall: Date.now(),
-          startedAtPerf: performance.now(),
-        });
-      } catch { /* ignore */ }
-    });
-    conn.on('data', (msg) => {
-      if (!msg || typeof msg !== 'object') return;
-      const rec = recordingRef.current;
-      switch (msg.type) {
-        case 'hello':
-          if (rec) {
-            rec.peer.role = msg.role ?? null;
-            rec.peer.startedAtWall = msg.startedAtWall ?? null;
-          }
-          break;
-        case 'motion':
-          if (Array.isArray(msg.samples)) {
-            if (rec) for (const s of msg.samples) rec.peer.motion.push(s);
-            for (const s of msg.samples) {
-              if (s.rrA != null || s.rrB != null || s.rrG != null) {
-                peerPreviewRef.current.push(s);
-              }
-            }
-          }
-          break;
-        case 'orientation':
-          if (Array.isArray(msg.samples)) {
-            if (rec) for (const s of msg.samples) rec.peer.orientation.push(s);
-            for (const s of msg.samples) {
-              if (s.alpha != null) peerOrientPreviewRef.current.push(s);
-            }
-          }
-          break;
-        case 'gps':
-          if (rec && Array.isArray(msg.samples)) {
-            for (const s of msg.samples) rec.peer.gps.push(s);
-          }
-          break;
-        case 'ping':
-          try { conn.send({ type: 'pong', t: msg.t }); } catch { /* ignore */ }
-          break;
-        case 'pong':
-          if (pingStartRef.current && msg.t === pingStartRef.current.t) {
-            setLastPing(Math.round(performance.now() - pingStartRef.current.start));
-            pingStartRef.current = null;
-          }
-          break;
-        default:
-          break;
-      }
-    });
-    conn.on('close', () => {
-      setPeerStatus('online');
-      connRef.current = null;
-    });
-    conn.on('error', (err) => {
-      setPeerError(String(err?.message ?? err));
-      setPeerStatus('error');
-    });
-  }, [role]);
-
-  const initPeer = useCallback(() => {
-    if (peerRef.current) return;
-    setPeerStatus('initializing');
-    setPeerError('');
-
-    let attempts = 0;
-    const tryClaim = () => {
-      attempts += 1;
-      const shortCode = makeShortCode();
-      const desiredId = PEER_ID_PREFIX + shortCode;
-      const peer = new Peer(desiredId);
-      let opened = false;
-
-      peer.on('open', (id) => {
-        opened = true;
-        peerRef.current = peer;
-        setMyPeerId(id);
-        setPeerStatus('online');
-      });
-      peer.on('connection', (conn) => {
-        setupConnHandlers(conn);
-        setPeerStatus('connecting');
-      });
-      peer.on('error', (err) => {
-        if (!opened && err?.type === 'unavailable-id' && attempts < PEER_ID_RETRIES) {
-          // Collision on the public broker — pick a new code and retry.
-          try { peer.destroy(); } catch { /* ignore */ }
-          tryClaim();
-          return;
+  // ---------- Peer link (shared hook) ----------
+  // Connection lifecycle lives in usePeerLink; this page only owns message
+  // semantics (hello / motion / orientation / gps) and the hello-on-open.
+  const handlePeerData = (msg) => {
+    const rec = recordingRef.current;
+    switch (msg.type) {
+      case 'hello':
+        if (rec) {
+          rec.peer.role = msg.role ?? null;
+          rec.peer.startedAtWall = msg.startedAtWall ?? null;
         }
-        setPeerError(String(err?.message ?? err));
-        setPeerStatus('error');
-      });
-      peer.on('disconnected', () => {
-        setPeerStatus((s) => (s === 'connected' ? 'online' : s));
-      });
-    };
-    tryClaim();
-  }, [setupConnHandlers]);
-
-  const connectToRemote = useCallback((overrideCode) => {
-    if (!peerRef.current) return;
-    const raw = (overrideCode ?? remoteShortCode).trim();
-    if (!raw) return;
-    // Accept either the bare short code ("12345") or the full peer id
-    // ("freespeed-12345") so the typed and scanned paths both work.
-    const targetId = raw.startsWith(PEER_ID_PREFIX) ? raw : PEER_ID_PREFIX + raw;
-    setPeerStatus('connecting');
-    const conn = peerRef.current.connect(targetId, { reliable: true });
-    setupConnHandlers(conn);
-  }, [remoteShortCode, setupConnHandlers]);
-
-  // Generate a QR code for the join URL once we have our own peer id.
-  useEffect(() => {
-    if (!myPeerId) { setQrDataUrl(''); return; }
-    const url = buildJoinUrl(shortFromPeerId(myPeerId));
-    QRCode.toDataURL(url, { width: 240, margin: 1 })
-      .then(setQrDataUrl)
-      .catch(() => setQrDataUrl(''));
-  }, [myPeerId]);
-
-  // If the page was opened via a join URL (e.g. by scanning the other phone's
-  // QR), prefill the remote code, kick off peer init, and auto-connect once
-  // online.
-  useEffect(() => {
-    const join = parseJoinFromHash();
-    if (!join) return;
-    setRemoteShortCode(join);
-    autoConnectOnReadyRef.current = true;
-    initPeer();
-  }, [initPeer]);
-
-  // When the auto-connect flag is set and we just came online, trigger connect.
-  useEffect(() => {
-    if (peerStatus !== 'online') return;
-    if (!autoConnectOnReadyRef.current) return;
-    autoConnectOnReadyRef.current = false;
-    connectToRemote();
-  }, [peerStatus, connectToRemote]);
-
-  const sendPing = () => {
-    const conn = connRef.current;
-    if (!conn || !conn.open) return;
-    const t = Math.random().toString(36).slice(2);
-    pingStartRef.current = { t, start: performance.now() };
-    try { conn.send({ type: 'ping', t }); } catch { /* ignore */ }
+        break;
+      case 'motion':
+        if (Array.isArray(msg.samples)) {
+          if (rec) for (const s of msg.samples) rec.peer.motion.push(s);
+          for (const s of msg.samples) {
+            if (s.rrA != null || s.rrB != null || s.rrG != null) {
+              peerPreviewRef.current.push(s);
+            }
+          }
+        }
+        break;
+      case 'orientation':
+        if (Array.isArray(msg.samples)) {
+          if (rec) for (const s of msg.samples) rec.peer.orientation.push(s);
+          for (const s of msg.samples) {
+            if (s.alpha != null) peerOrientPreviewRef.current.push(s);
+          }
+        }
+        break;
+      case 'gps':
+        if (rec && Array.isArray(msg.samples)) {
+          for (const s of msg.samples) rec.peer.gps.push(s);
+        }
+        break;
+      default:
+        break;
+    }
   };
+
+  const handlePeerOpen = (conn) => {
+    // Tell the peer our role + startup time so it can tag peer.role/startedAtWall.
+    try {
+      conn.send({
+        type: 'hello',
+        role,
+        startedAtWall: Date.now(),
+        startedAtPerf: performance.now(),
+      });
+    } catch { /* ignore */ }
+  };
+
+  const link = usePeerLink({ page: 'oar', onData: handlePeerData, onOpen: handlePeerOpen });
 
   // ---------- Live sensor handlers ----------
   const motionHandlerRef = useRef(null);
@@ -343,7 +205,7 @@ function OarCapture({ onBack }) {
     if (sample.rrA != null || sample.rrB != null || sample.rrG != null) {
       ownPreviewRef.current.push(sample);
     }
-    if (connRef.current?.open) sendBufferRef.current.motion.push(sample);
+    if (link.isOpen()) sendBufferRef.current.motion.push(sample);
   };
 
   orientationHandlerRef.current = (event) => {
@@ -359,7 +221,7 @@ function OarCapture({ onBack }) {
     };
     rec.orientation.push(sample);
     if (sample.alpha != null) ownOrientPreviewRef.current.push(sample);
-    if (connRef.current?.open) sendBufferRef.current.orientation.push(sample);
+    if (link.isOpen()) sendBufferRef.current.orientation.push(sample);
   };
 
   // ---------- Capture lifecycle ----------
@@ -384,18 +246,13 @@ function OarCapture({ onBack }) {
     setHasRecording(false);
     setIsCapturing(true);
 
-    // Mirror existing hello to a freshly-connected peer (if any) so the peer
-    // tags its peer.role/startedAtWall correctly.
-    if (connRef.current?.open) {
-      try {
-        connRef.current.send({
-          type: 'hello',
-          role,
-          startedAtWall: Date.now(),
-          startedAtPerf: performance.now(),
-        });
-      } catch { /* ignore */ }
-    }
+    // Mirror a hello to an already-connected peer so it tags peer.role/startedAtWall.
+    link.sendData({
+      type: 'hello',
+      role,
+      startedAtWall: Date.now(),
+      startedAtPerf: performance.now(),
+    });
 
     // Attach motion + orientation listeners. These dispatch into ref handlers
     // so we don't tear them down on every re-render.
@@ -424,7 +281,7 @@ function OarCapture({ onBack }) {
           };
           const rec = recordingRef.current;
           if (rec) rec.gps.push(sample);
-          if (connRef.current?.open) sendBufferRef.current.gps.push(sample);
+          if (link.isOpen()) sendBufferRef.current.gps.push(sample);
           setGpsStatus('active');
         },
         () => setGpsStatus('unavailable'),
@@ -435,24 +292,9 @@ function OarCapture({ onBack }) {
       setGpsStatus('unavailable');
     }
 
-    // Periodically flush the send buffer to the data channel.
+    // Periodically flush the send buffer to the data channel (no-op if no peer).
     sendIntervalRef.current = setInterval(() => {
-      const conn = connRef.current;
-      if (!conn || !conn.open) {
-        // Drop the buffer — no peer to send to.
-        sendBufferRef.current = { motion: [], orientation: [], gps: [] };
-        return;
-      }
-      const buf = sendBufferRef.current;
-      if (buf.motion.length) {
-        try { conn.send({ type: 'motion', samples: buf.motion }); } catch { /* ignore */ }
-      }
-      if (buf.orientation.length) {
-        try { conn.send({ type: 'orientation', samples: buf.orientation }); } catch { /* ignore */ }
-      }
-      if (buf.gps.length) {
-        try { conn.send({ type: 'gps', samples: buf.gps }); } catch { /* ignore */ }
-      }
+      link.sendBatch(sendBufferRef.current);
       sendBufferRef.current = { motion: [], orientation: [], gps: [] };
     }, SEND_BATCH_MS);
 
@@ -604,12 +446,10 @@ function OarCapture({ onBack }) {
     return () => clearInterval(id);
   }, [role]);
 
-  // Tear down peerjs on unmount.
+  // Tear down capture resources on unmount (the peer link cleans itself up).
   useEffect(() => () => {
     if (gpsWatchRef.current != null) navigator.geolocation.clearWatch(gpsWatchRef.current);
     if (sendIntervalRef.current != null) clearInterval(sendIntervalRef.current);
-    connRef.current?.close?.();
-    peerRef.current?.destroy?.();
   }, []);
 
   const downloadRecording = () => {
@@ -707,8 +547,8 @@ function OarCapture({ onBack }) {
     online: 'Online — waiting for connection',
     connecting: 'Connecting…',
     connected: 'Connected',
-    error: `Error: ${peerError}`,
-  })[peerStatus] ?? peerStatus;
+    error: `Error: ${link.peerError}`,
+  })[link.peerStatus] ?? link.peerStatus;
 
   return (
     <div className="oar-capture">
@@ -748,45 +588,45 @@ function OarCapture({ onBack }) {
       <section className="oar-section">
         <h2>Peer link</h2>
         <p className="oar-status">Status: {peerLabel}</p>
-        {!peerRef.current && (
-          <button className="btn btn-primary" onClick={initPeer}>
+        {!link.hasPeer && (
+          <button className="btn btn-primary" onClick={link.initPeer}>
             Initialize peer
           </button>
         )}
-        {peerRef.current && (
+        {link.hasPeer && (
           <>
             <div className="oar-join-card">
               <div className="oar-short-code">
-                {myPeerId ? shortFromPeerId(myPeerId) : '…'}
+                {link.shortCode || '…'}
               </div>
               <div className="oar-join-hint">
                 Other phone can scan this QR or type the code above.
               </div>
-              {qrDataUrl && (
-                <img className="oar-qr" src={qrDataUrl} alt="Join QR code" />
+              {link.qrDataUrl && (
+                <img className="oar-qr" src={link.qrDataUrl} alt="Join QR code" />
               )}
             </div>
             <div className="oar-row">
               <input
                 type="text"
                 inputMode="numeric"
-                value={remoteShortCode}
-                onChange={(e) => setRemoteShortCode(e.target.value)}
+                value={link.remoteShortCode}
+                onChange={(e) => link.setRemoteShortCode(e.target.value)}
                 placeholder="Other phone's code"
-                disabled={peerStatus === 'connected'}
+                disabled={link.peerStatus === 'connected'}
               />
               <button
                 className="btn btn-secondary"
-                onClick={() => connectToRemote()}
-                disabled={!myPeerId || !remoteShortCode.trim() || peerStatus === 'connected'}
+                onClick={() => link.connectToRemote()}
+                disabled={!link.myPeerId || !link.remoteShortCode.trim() || link.peerStatus === 'connected'}
               >
                 Connect
               </button>
             </div>
-            {peerStatus === 'connected' && (
+            {link.peerStatus === 'connected' && (
               <div className="oar-row">
-                <button className="btn btn-secondary" onClick={sendPing}>Ping</button>
-                {lastPing != null && <span className="oar-mono">RTT: {lastPing} ms</span>}
+                <button className="btn btn-secondary" onClick={link.sendPing}>Ping</button>
+                {link.lastPing != null && <span className="oar-mono">RTT: {link.lastPing} ms</span>}
               </div>
             )}
           </>

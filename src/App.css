@@ -1224,6 +1224,24 @@ html.live-mode body {
   line-height: 1.4;
 }
 
+.live-link {
+  padding: 0.6rem 1rem 0.75rem;
+  background: white;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.live-link .oar-role-toggle {
+  margin-bottom: 0.5rem;
+}
+
+.live-link .oar-status {
+  margin: 0.4rem 0;
+}
+
+.live-link .oar-join-card {
+  margin: 0.4rem 0 0.2rem;
+}
+
 .live-stats {
   display: flex;
   justify-content: center;

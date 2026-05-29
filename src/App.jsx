@@ -19,7 +19,7 @@ const RACE_DISTANCE = 2000;
 function App() {
   const pageFromHash = () => {
     const h = window.location.hash;
-    if (h === '#live') return 'live';
+    if (h === '#live' || h.startsWith('#live?')) return 'live';
     if (h === '#oar' || h.startsWith('#oar?')) return 'oar';
     if (h === '#tradeoffs') return 'tradeoffs';
     return 'calculator';
