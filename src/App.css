@@ -1230,6 +1230,25 @@ html.live-mode body {
   border-bottom: 1px solid #e2e8f0;
 }
 
+.live-link-connected {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 1rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #2f855a;
+}
+
+.live-link-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #38a169;
+  box-shadow: 0 0 0 3px rgba(56, 161, 105, 0.18);
+  flex-shrink: 0;
+}
+
 .live-link .oar-role-toggle {
   margin-bottom: 0.5rem;
 }

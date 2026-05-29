@@ -199,6 +199,9 @@ function LiveCapture({ onSaveCurve, onBack }) {
   // the same processing pipeline on the received samples.
   const [linkRole, setLinkRole] = useState('rower');
   const [isWatching, setIsWatching] = useState(false); // coach is receiving a live session
+  // Coach can pause the live feed to inspect individual strokes without stopping
+  // the stream — the proc keeps accumulating in the background and resume catches up.
+  const [isPaused, setIsPaused] = useState(false);
 
   // UI state (synced from refs periodically during capture)
   const [strokeRate, setStrokeRate] = useState(0);
@@ -233,6 +236,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const sendBufferRef = useRef({ motion: [], orientation: [], gps: [] });
   const sendIntervalRef = useRef(null);
   const calibSentRef = useRef(false); // rower: calib message sent to coach once
+  const isPausedRef = useRef(false);  // coach: live feed frozen for stroke inspection
 
   // Detect sensor availability
   useEffect(() => {
@@ -440,11 +444,15 @@ function LiveCapture({ onSaveCurve, onBack }) {
     setStrokes([]);
     setSelection(null);
     setSelectedIndex(null);
+    isPausedRef.current = false;
+    setIsPaused(false);
     setIsWatching(true);
   };
 
   const stopWatch = () => {
     setIsWatching(false);
+    isPausedRef.current = false;
+    setIsPaused(false);
     const proc = procRef.current;
     if (proc) {
       setStrokeRate(proc.strokeRate);
@@ -458,6 +466,31 @@ function LiveCapture({ onSaveCurve, onBack }) {
     }
     const rec = recordingRef.current;
     if (rec && rec.motion.length > 0) setHasRecording(true);
+  };
+
+  // Coach: freeze the live view and snapshot the strokes so far for inspection.
+  // The stream keeps feeding proc in the background; resume returns to live.
+  const pauseWatch = () => {
+    const proc = procRef.current;
+    if (proc) {
+      setStrokes([...proc.strokes]);
+      setAvgCurve(proc.avgCurve);
+      setStrokeRate(proc.strokeRate);
+      setStrokeCount(proc.strokeCount);
+      setHasGPSAnchoring(proc.hasGPS);
+    }
+    setSelection(null);
+    setSelectedIndex(null);
+    isPausedRef.current = true;
+    setIsPaused(true);
+  };
+
+  const resumeWatch = () => {
+    isPausedRef.current = false;
+    setIsPaused(false);
+    setStrokes([]);        // back to the live running average
+    setSelection(null);
+    setSelectedIndex(null);
   };
 
   // --- Peer link (shared hook) ---
@@ -580,6 +613,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     const id = setInterval(() => {
       const proc = procRef.current;
       if (!proc) return;
+      if (isPausedRef.current) return; // frozen for stroke inspection
       setStrokeRate(proc.strokeRate);
       setStrokeCount(proc.strokeCount);
       setLastStroke(proc.lastStroke);
@@ -1076,7 +1110,14 @@ function LiveCapture({ onSaveCurve, onBack }) {
     error: `Error: ${link.peerError}`,
   })[link.peerStatus] ?? link.peerStatus;
 
-  const linkPanel = (
+  // Once connected, collapse the whole pairing UI to a one-line indicator —
+  // the QR/code/role toggle only matter until the link is established.
+  const linkPanel = link.peerStatus === 'connected' ? (
+    <div className="live-link live-link-connected">
+      <span className="live-link-dot" />
+      <span>{linkRole === 'coach' ? 'Connected to rower' : 'Coach connected'}</span>
+    </div>
+  ) : (
     <div className="live-link">
       <div className="oar-role-toggle">
         <label className={linkRole === 'rower' ? 'active' : ''}>
@@ -1199,13 +1240,17 @@ function LiveCapture({ onSaveCurve, onBack }) {
     </div>
   );
 
-  const timeChartView = !isLive && strokes.length > 1 && (
+  // The stroke inspector is available after a session ends and, for a coach,
+  // while paused mid-session.
+  const showStrokeInspector = (!isLive || isPaused) && strokes.length > 1;
+  const timeChartView = showStrokeInspector && (
     <div className="live-time-chart">
       <div className="live-time-chart-wrapper">
         <Line ref={timeChartRef} data={timeChartData} options={timeChartOptions} />
       </div>
       <div className="live-time-chart-footer">
         <span>
+          {isPaused ? 'Paused · ' : ''}
           {individualStroke
             ? `Viewing stroke #${selectedIndex + 1} of ${strokes.length}`
             : selection
@@ -1289,7 +1334,27 @@ function LiveCapture({ onSaveCurve, onBack }) {
           {timeChartView}
           {axisConfigView}
           <div className="live-actions">
-            {!isWatching && sessionActions}
+            {isWatching && (
+              isPaused ? (
+                <button className="btn btn-primary btn-large" onClick={resumeWatch}>
+                  Resume live
+                </button>
+              ) : (
+                <button className="btn btn-secondary btn-large" onClick={pauseWatch}>
+                  Pause to inspect
+                </button>
+              )
+            )}
+            {avgCurve && (
+              <button className="btn btn-primary btn-large" onClick={handleSave}>
+                Save & Open in Calculator
+              </button>
+            )}
+            {(hasRecording || (isWatching && strokeCount > 0)) && (
+              <button className="btn btn-secondary btn-large" onClick={downloadRecording}>
+                Download recording
+              </button>
+            )}
           </div>
         </>
       ) : (
