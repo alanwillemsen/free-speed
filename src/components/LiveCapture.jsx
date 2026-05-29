@@ -990,12 +990,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
         data: strokes.map(s => ({ x: (s.time - t0) / 1000, y: strokeY(s) })),
         spanGaps: true,
         borderColor: '#667eea',
-        backgroundColor: (ctx) => {
-          if (ctx.dataIndex === selectedIndex) return '#ef4444';
-          const s = strokes[ctx.dataIndex];
-          const inRange = !selection || (s && s.time >= selection.min && s.time <= selection.max);
-          return inRange ? '#667eea' : 'rgba(102, 126, 234, 0.25)';
-        },
+        backgroundColor: (ctx) => ctx.dataIndex === selectedIndex ? '#ef4444' : '#667eea',
         borderWidth: 1.5,
         pointRadius: (ctx) => ctx.dataIndex === selectedIndex ? 6 : 2.5,
         pointHoverRadius: 6,
@@ -1003,12 +998,15 @@ function LiveCapture({ onSaveCurve, onBack }) {
         fill: false,
       }],
     };
-  }, [strokes, t0, selectedIndex, selection, hasGPSAnchoring]);
+  }, [strokes, t0, selectedIndex, hasGPSAnchoring]);
 
   const timeChartOptions = useMemo(() => ({
     responsive: true,
     maintainAspectRatio: false,
     animation: false,
+    // Tap the nearest stroke by x — small dense points are otherwise unhittable
+    // on touch, especially before zooming in.
+    interaction: { mode: 'nearest', intersect: false, axis: 'x' },
     onClick: (_event, elements) => {
       if (elements.length > 0) setSelectedIndex(elements[0].index);
     },
@@ -1016,7 +1014,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
       legend: { display: false },
       title: {
         display: true,
-        text: 'Tap a stroke to inspect • use the slider to select a range',
+        text: 'Tap a stroke to inspect • drag the slider to zoom to a range',
         font: { size: 13, weight: 'normal' },
       },
       tooltip: { enabled: false },
@@ -1024,6 +1022,17 @@ function LiveCapture({ onSaveCurve, onBack }) {
     scales: {
       x: {
         type: 'linear',
+        // The range slider zooms the chart: with 1000+ strokes the only way to
+        // tap an individual one is to narrow the window first. Pad so a narrow
+        // (even single-stroke) selection still has width and edge points show.
+        ...(selection
+          ? (() => {
+              const lo = (selection.min - t0) / 1000;
+              const hi = (selection.max - t0) / 1000;
+              const pad = Math.max((hi - lo) * 0.05, 1);
+              return { min: lo - pad, max: hi + pad };
+            })()
+          : {}),
         title: { display: true, text: 'Time (s)', font: { size: 11 } },
       },
       y: {
@@ -1037,7 +1046,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
           : undefined,
       },
     },
-  }), [hasGPSAnchoring]);
+  }), [hasGPSAnchoring, selection, t0]);
 
   const resetSelection = () => {
     setSelection(null);
