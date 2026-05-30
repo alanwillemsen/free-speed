@@ -10,6 +10,7 @@ import {
   Filler,
 } from 'chart.js';
 import { Line } from 'react-chartjs-2';
+import LiveBigScreen from './LiveBigScreen';
 import { usePeerLink } from '../hooks/usePeerLink';
 import { useWakeLock } from '../hooks/useWakeLock';
 import * as sessionStore from '../utils/sessionStore';
@@ -213,6 +214,9 @@ function orientationLabel(axis, sign) {
 function LiveCapture({ onSaveCurve, onBack }) {
   const [isCapturing, setIsCapturing] = useState(false);
   const [sensorStatus, setSensorStatus] = useState('checking');
+  // Outdoor full-screen readout (split + spm + speed profile). Capture keeps
+  // running underneath while it's open.
+  const [bigScreen, setBigScreen] = useState(false);
 
   // Coach link: 'rower' = this phone is mounted in the boat and (optionally)
   // streams to a coach; 'coach' = this phone watches a rower's stream and runs
@@ -1398,6 +1402,14 @@ function LiveCapture({ onSaveCurve, onBack }) {
       <div className="live-chart-wrapper">
         <Line data={chartData} options={chartOptions} />
       </div>
+      <button
+        className="live-bigscreen-btn"
+        onClick={() => setBigScreen(true)}
+        aria-label="Full-screen display"
+        title="Full-screen display"
+      >
+        {'⛶'}
+      </button>
       {!avgCurve && isLive && calibrationStatus === 'calibrating' && (
         <div className="live-chart-overlay">
           <span className="live-calibrating">
@@ -1541,6 +1553,15 @@ function LiveCapture({ onSaveCurve, onBack }) {
 
   return (
     <div className="live-capture">
+      {bigScreen && (
+        <LiveBigScreen
+          splitText={splitText}
+          strokeRate={strokeRate}
+          chartData={chartData}
+          hasGPSAnchoring={hasGPSAnchoring}
+          onClose={() => setBigScreen(false)}
+        />
+      )}
       <div className="live-header">
         <button className="btn btn-secondary btn-sm" onClick={onBack}>← Calculator</button>
         <h2>Live Stroke Capture</h2>
