@@ -25,24 +25,42 @@ const THEMES = {
 
 function LiveBigScreen({ splitText, freeSpeed, strokeRate, chartData, hasGPSAnchoring, onClose }) {
   const [theme, setTheme] = useState('sun');
+  // Locked orientation while full-screen. Defaults to landscape (the wide
+  // readout layout); the rotate button toggles it. The CSS layout follows the
+  // real orientation, so locking portrait re-flows the numbers above the graph.
+  const [orientation, setOrientation] = useState('landscape');
   const c = THEMES[theme];
   const rootRef = useRef(null);
 
-  // Go true full-screen where the platform allows it. The view works in both
-  // orientations (numbers beside the graph in landscape, above it in portrait),
-  // so we don't lock orientation — it follows the phone. iOS Safari supports
-  // full-screen for non-video elements; the fixed-position overlay still covers
-  // the viewport (and the whole screen as an installed PWA), so this degrades
-  // gracefully — it just keeps the browser chrome.
+  // Go true full-screen and lock to landscape where the platform allows it.
+  // Android only honours an orientation lock *while* full-screen, so the lock
+  // must come after requestFullscreen() resolves — order matters. The view also
+  // works in portrait (numbers above the graph instead of beside it), so if the
+  // lock isn't supported (iOS Safari has no screen.orientation.lock) it just
+  // degrades to following the phone. iOS Safari likewise lacks element
+  // full-screen on phones; the fixed-position overlay still covers the viewport
+  // (and the whole screen as an installed PWA), so that degrades gracefully too.
   useEffect(() => {
     const el = rootRef.current;
     (async () => {
       try { if (el?.requestFullscreen) await el.requestFullscreen(); } catch { /* ignore */ }
+      // Must run after full-screen is active, or Android rejects it.
+      try { await screen.orientation?.lock?.('landscape'); } catch { /* unsupported / rejected */ }
     })();
     return () => {
+      try { screen.orientation?.unlock?.(); } catch { /* ignore */ }
       try { if (document.fullscreenElement) document.exitFullscreen(); } catch { /* ignore */ }
     };
   }, []);
+
+  // Rotate button: flip the locked orientation. We're already full-screen here,
+  // so the lock applies immediately; the layout re-flows via CSS. On platforms
+  // without the lock (iOS) this no-ops and the view just stays as the phone is.
+  const toggleOrientation = async () => {
+    const next = orientation === 'landscape' ? 'portrait' : 'landscape';
+    setOrientation(next);
+    try { await screen.orientation?.lock?.(next); } catch { /* unsupported / rejected */ }
+  };
 
   // If the user leaves full-screen via a system gesture (swipe / Esc), keep
   // React state in sync by closing the overlay.
@@ -100,6 +118,14 @@ function LiveBigScreen({ splitText, freeSpeed, strokeRate, chartData, hasGPSAnch
       style={{ background: c.bg, color: c.fg }}
     >
       <div className="bigscreen-controls">
+        <button
+          className="bigscreen-ctrl"
+          onClick={toggleOrientation}
+          aria-label={`Switch to ${orientation === 'landscape' ? 'portrait' : 'landscape'}`}
+          title="Rotate"
+        >
+          {'⟳'}
+        </button>
         <button
           className="bigscreen-ctrl"
           onClick={() => setTheme((t) => (t === 'sun' ? 'dark' : 'sun'))}
