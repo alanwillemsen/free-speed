@@ -1469,7 +1469,10 @@ html.live-mode body {
     justify-content: space-around;
     align-items: center;
     gap: 4vw;
-    padding: 3vh 4vw 1vh;
+    /* Drop the numbers below the control buttons (2.6rem tall at a 0.5rem
+       offset) so the SPM isn't hidden behind them. Landscape keeps the numbers
+       on the left, clear of the top-right buttons, so it needs no offset. */
+    padding: calc(env(safe-area-inset-top) + 3.4rem) 4vw 1vh;
     box-sizing: border-box;
   }
   .bigscreen-metric { align-items: center; }
