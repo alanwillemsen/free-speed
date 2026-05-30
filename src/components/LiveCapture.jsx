@@ -1367,6 +1367,13 @@ function LiveCapture({ onSaveCurve, onBack }) {
   }
   const splitText = hasGPSAnchoring && displaySplitSpeed > 0 ? formatSplit(500 / displaySplitSpeed) : '—';
 
+  // Current split vs the "potential" reference curve, in seconds per 500m.
+  // Negative = ahead of potential pace, positive = behind. Only meaningful when
+  // GPS-anchored (without GPS the curve magnitude is normalised, not real m/s).
+  const splitDelta = hasGPSAnchoring && displaySplitSpeed > 0
+    ? 500 / displaySplitSpeed - 500 / REF_AVG
+    : null;
+
   const statsView = (
     <div className="live-stats">
       <div className="live-stat">
@@ -1556,6 +1563,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
       {bigScreen && (
         <LiveBigScreen
           splitText={splitText}
+          splitDelta={splitDelta}
           strokeRate={strokeRate}
           chartData={chartData}
           hasGPSAnchoring={hasGPSAnchoring}

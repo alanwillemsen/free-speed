@@ -1414,6 +1414,22 @@ html.live-mode body {
   margin-top: 0.4vh;
 }
 
+/* Latest split vs potential, coloured green (ahead) or red (behind). Sits with
+   the split since it's the trend on that number. */
+.bigscreen-delta {
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  margin-top: 1vh;
+  white-space: nowrap;
+}
+
+.bigscreen-delta-cap {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
 /* The stroke speed profile fills whatever space the numbers don't take. */
 .bigscreen-graph {
   flex: 1 1 auto;
@@ -1431,12 +1447,14 @@ html.live-mode body {
     flex-direction: column;
     justify-content: center;
     align-items: flex-start;
-    gap: 4vh;
+    gap: 3vh;
     padding-left: 4vw;
   }
   .bigscreen-metric { align-items: flex-start; }
-  .bigscreen-split { font-size: clamp(3rem, 20vh, 12rem); }
-  .bigscreen-spm { font-size: clamp(2.5rem, 16vh, 10rem); }
+  .bigscreen-split { font-size: clamp(3rem, 17vh, 11rem); }
+  .bigscreen-spm { font-size: clamp(2.5rem, 13vh, 8rem); }
+  .bigscreen-delta { font-size: clamp(1.4rem, 5.5vh, 3.5rem); }
+  .bigscreen-delta-cap { font-size: clamp(0.6rem, 2vh, 1.1rem); }
   .bigscreen-graph { padding: 4vh 3vw 4vh 1vw; }
 }
 
@@ -1449,14 +1467,16 @@ html.live-mode body {
     width: 100%;
     flex-direction: row;
     justify-content: space-around;
-    align-items: flex-end;
+    align-items: center;
     gap: 4vw;
     padding: 3vh 4vw 1vh;
     box-sizing: border-box;
   }
   .bigscreen-metric { align-items: center; }
-  .bigscreen-split { font-size: clamp(3rem, 19vw, 9rem); }
-  .bigscreen-spm { font-size: clamp(2.5rem, 16vw, 7rem); }
+  .bigscreen-split { font-size: clamp(3rem, 17vw, 9rem); }
+  .bigscreen-spm { font-size: clamp(2.5rem, 14vw, 7rem); }
+  .bigscreen-delta { font-size: clamp(1.3rem, 5vw, 3rem); }
+  .bigscreen-delta-cap { font-size: clamp(0.55rem, 2vw, 1rem); }
   .bigscreen-graph { width: 100%; padding: 1vh 3vw 4vh; }
 }
 

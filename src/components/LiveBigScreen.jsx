@@ -14,16 +14,16 @@ const THEMES = {
   sun: {
     bg: '#ffffff', fg: '#0a0a0a', muted: '#555555',
     accent: '#0040c0', potential: 'rgba(0,0,0,0.35)', last: 'rgba(0,0,0,0.4)',
-    grid: 'rgba(0,0,0,0.12)',
+    grid: 'rgba(0,0,0,0.12)', good: '#0a8f3c', bad: '#c01010',
   },
   dark: {
     bg: '#000000', fg: '#ffffff', muted: '#9a9a9a',
     accent: '#ffd000', potential: 'rgba(255,255,255,0.35)', last: 'rgba(255,255,255,0.45)',
-    grid: 'rgba(255,255,255,0.14)',
+    grid: 'rgba(255,255,255,0.14)', good: '#3ad860', bad: '#ff5a5a',
   },
 };
 
-function LiveBigScreen({ splitText, strokeRate, chartData, hasGPSAnchoring, onClose }) {
+function LiveBigScreen({ splitText, splitDelta, strokeRate, chartData, hasGPSAnchoring, onClose }) {
   const [theme, setTheme] = useState('sun');
   const c = THEMES[theme];
   const rootRef = useRef(null);
@@ -116,6 +116,13 @@ function LiveBigScreen({ splitText, strokeRate, chartData, hasGPSAnchoring, onCl
         <div className="bigscreen-metric">
           <div className="bigscreen-value bigscreen-split" style={{ color: c.accent }}>{splitText}</div>
           <div className="bigscreen-label" style={{ color: c.muted }}>/500m</div>
+          {splitDelta != null && (
+            <div className="bigscreen-delta" style={{ color: splitDelta <= 0 ? c.good : c.bad }}>
+              {(splitDelta <= 0 ? '−' : '+') + Math.abs(splitDelta).toFixed(1) + 's'}
+              {' '}
+              <span className="bigscreen-delta-cap" style={{ color: c.muted }}>vs potential</span>
+            </div>
+          )}
         </div>
         <div className="bigscreen-metric">
           <div className="bigscreen-value bigscreen-spm">{strokeRate || '—'}</div>
