@@ -1506,6 +1506,57 @@ html.live-mode body {
   background-color: #b91c1c;
 }
 
+/* Hold-to-stop: disable text selection / long-press menu while holding. */
+.live-stop-btn {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
+}
+
+/* Crash-recovery banner */
+.live-recover {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin: 0.5rem 1rem;
+  padding: 0.6rem 0.85rem;
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  color: #78350f;
+}
+
+.live-recover-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* Transient hint shown when a back gesture is trapped during capture */
+.live-nav-hint {
+  position: fixed;
+  left: 50%;
+  bottom: 5.5rem;
+  transform: translateX(-50%);
+  z-index: 50;
+  background: rgba(17, 24, 39, 0.92);
+  color: white;
+  padding: 0.6rem 1rem;
+  border-radius: 999px;
+  font-size: 0.88rem;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+  animation: live-nav-hint-in 0.15s ease-out;
+}
+
+@keyframes live-nav-hint-in {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
 .live-permission,
 .live-message {
   flex: 1;
