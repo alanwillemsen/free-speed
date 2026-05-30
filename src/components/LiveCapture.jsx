@@ -1388,8 +1388,13 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const splitText = hasGPSAnchoring && displaySplitSpeed > 0 ? formatSplit(500 / displaySplitSpeed) : '—';
 
   // Speed (m/s) available by matching the potential curve's shape at your
-  // current effort — see freeSpeedGain. Only meaningful when GPS-anchored.
-  const freeSpeed = hasGPSAnchoring ? freeSpeedGain(displayAvgCurve, REF_SPEEDS) : null;
+  // current effort — see freeSpeedGain. Uses the latest stroke while live so it
+  // updates every stroke (the inspected stroke when reviewing one, else the
+  // selected average). Only meaningful when GPS-anchored.
+  const freeSpeedSource = individualStroke ? individualStroke.curve
+    : isLive ? lastStroke
+    : displayAvgCurve;
+  const freeSpeed = hasGPSAnchoring ? freeSpeedGain(freeSpeedSource, REF_SPEEDS) : null;
 
   const statsView = (
     <div className="live-stats">
