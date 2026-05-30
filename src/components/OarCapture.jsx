@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { usePeerLink } from '../hooks/usePeerLink';
+import { useWakeLock } from '../hooks/useWakeLock';
 import {
   Chart as ChartJS,
   LinearScale,
@@ -89,7 +90,7 @@ function OarCapture({ onBack }) {
   // --- Persistent refs ---
   const recordingRef = useRef(null);
   const gpsWatchRef = useRef(null);
-  const wakeLockRef = useRef(null);
+  const wakeLock = useWakeLock();
   const sendBufferRef = useRef({ motion: [], orientation: [], gps: [] });
   const sendIntervalRef = useRef(null);
 
@@ -298,12 +299,8 @@ function OarCapture({ onBack }) {
       sendBufferRef.current = { motion: [], orientation: [], gps: [] };
     }, SEND_BATCH_MS);
 
-    // Wake lock so screen stays on.
-    try {
-      if ('wakeLock' in navigator) {
-        wakeLockRef.current = await navigator.wakeLock.request('screen');
-      }
-    } catch { /* not critical */ }
+    // Keep the screen awake; re-acquired automatically after any blink-off.
+    wakeLock.request();
   };
 
   const stopCapture = () => {
@@ -322,8 +319,7 @@ function OarCapture({ onBack }) {
       clearInterval(sendIntervalRef.current);
       sendIntervalRef.current = null;
     }
-    wakeLockRef.current?.release().catch(() => {});
-    wakeLockRef.current = null;
+    wakeLock.release();
     setGpsStatus('idle');
     if (rec && rec.motion.length > 0) setHasRecording(true);
   };

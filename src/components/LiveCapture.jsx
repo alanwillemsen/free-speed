@@ -11,6 +11,8 @@ import {
 } from 'chart.js';
 import { Line } from 'react-chartjs-2';
 import { usePeerLink } from '../hooks/usePeerLink';
+import { useWakeLock } from '../hooks/useWakeLock';
+import * as sessionStore from '../utils/sessionStore';
 import referenceCurveData from '../data/referenceCurve.json';
 
 ChartJS.register(LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler);
@@ -25,6 +27,7 @@ const MAX_STROKES = 500;          // Rolling window for averaging
 const UI_UPDATE_MS = 250;
 const CALIBRATION_MS = 3000;      // Auto-orientation calibration window
 const SEND_BATCH_MS = 100;        // Batch outgoing samples this often when coach-linked
+const PERSIST_FLUSH_MS = 2000;    // Flush new samples to IndexedDB this often (crash recovery)
 const SPLIT_WINDOW_MS = 5000;     // GPS-speed averaging window for per-stroke split
 const SPLIT_MAX_SPEED = 12;       // m/s sanity bound — drop GPS speed spikes
 
@@ -246,13 +249,24 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const axisRef = useRef({ axis: 'y', sign: 1 });
   const orientationRef = useRef({ beta: 0, gamma: 0 });
   const gpsRef = useRef({ speeds: [], watchId: null });
-  const wakeLockRef = useRef(null);
   const recordingRef = useRef(null);
   const fileInputRef = useRef(null);
   const sendBufferRef = useRef({ motion: [], orientation: [], gps: [] });
   const sendIntervalRef = useRef(null);
   const calibSentRef = useRef(false); // rower: calib message sent to coach once
   const isPausedRef = useRef(false);  // coach: live feed frozen for stroke inspection
+  // New samples since the last IndexedDB flush (crash-recovery persistence).
+  const persistBufferRef = useRef({ motion: [], orientation: [], gps: [] });
+  const persistIntervalRef = useRef(null);
+
+  const wakeLock = useWakeLock();
+
+  // A previous capture that didn't end cleanly (crash / reload / tab reap),
+  // offered for recovery on mount. null once handled.
+  const [recoverable, setRecoverable] = useState(null);
+  // Gates auto-start: we must finish checking IndexedDB for a recoverable
+  // session before auto-starting, or a new capture would wipe it first.
+  const [recoveryChecked, setRecoveryChecked] = useState(false);
 
   // Detect sensor availability
   useEffect(() => {
@@ -303,7 +317,10 @@ function LiveCapture({ onSaveCurve, onBack }) {
       // Stream to a connected coach. Guard on nowOverride so coach-fed samples
       // (replay / received stream) never get re-buffered; the flush interval
       // drops the buffer when no peer is connected.
-      if (nowOverride == null) sendBufferRef.current.motion.push(sample);
+      if (nowOverride == null) {
+        sendBufferRef.current.motion.push(sample);
+        persistBufferRef.current.motion.push(sample);
+      }
     }
 
     // --- Gravity compensation ---
@@ -623,6 +640,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
         const rec = recordingRef.current;
         if (rec) rec.orientation.push(sample);
         sendBufferRef.current.orientation.push(sample);
+        persistBufferRef.current.orientation.push(sample);
       }
     };
     window.addEventListener('deviceorientation', handler);
@@ -663,10 +681,38 @@ function LiveCapture({ onSaveCurve, onBack }) {
     return () => clearInterval(id);
   }, [isCapturing, isWatching, linkRole, linkIsOpen, linkSendData]);
 
-  // Clean up the streaming interval on unmount (the peer link self-cleans).
+  // Clean up the streaming + persistence intervals on unmount (the peer link
+  // and wake lock self-clean via their own hooks).
   useEffect(() => () => {
     if (sendIntervalRef.current != null) clearInterval(sendIntervalRef.current);
+    if (persistIntervalRef.current != null) clearInterval(persistIntervalRef.current);
   }, []);
+
+  // On mount, check IndexedDB for a session that didn't end cleanly and offer
+  // to recover it. Only meaningful for the rower (the phone doing the capture).
+  useEffect(() => {
+    let cancelled = false;
+    sessionStore.load()
+      .then((rec) => {
+        if (cancelled) return;
+        if (rec && rec.motion && rec.motion.length > 0) setRecoverable(rec);
+      })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setRecoveryChecked(true); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const recoverSession = () => {
+    const rec = recoverable;
+    setRecoverable(null);
+    sessionStore.clear().catch(() => {});
+    if (rec) replayRecording(rec);
+  };
+
+  const discardRecoverable = () => {
+    setRecoverable(null);
+    sessionStore.clear().catch(() => {});
+  };
 
   const startCapture = async () => {
     procRef.current = makeProc(performance.now());
@@ -679,7 +725,9 @@ function LiveCapture({ onSaveCurve, onBack }) {
       gps: [],
     };
     sendBufferRef.current = { motion: [], orientation: [], gps: [] };
+    persistBufferRef.current = { motion: [], orientation: [], gps: [] };
     calibSentRef.current = false;
+    setRecoverable(null);
     setStrokeRate(0);
     setStrokeCount(0);
     setLastStroke(null);
@@ -701,6 +749,17 @@ function LiveCapture({ onSaveCurve, onBack }) {
       sendBufferRef.current = { motion: [], orientation: [], gps: [] };
     }, SEND_BATCH_MS);
 
+    // Persist raw samples to IndexedDB so a crash / reload / backgrounded-tab
+    // reap doesn't lose the session — it can be recovered on next load.
+    sessionStore.begin(recordingRef.current).catch(() => {});
+    persistIntervalRef.current = setInterval(() => {
+      const buf = persistBufferRef.current;
+      if (buf.motion.length || buf.orientation.length || buf.gps.length) {
+        persistBufferRef.current = { motion: [], orientation: [], gps: [] };
+        sessionStore.appendBatch(buf).catch(() => {});
+      }
+    }, PERSIST_FLUSH_MS);
+
     // Start GPS tracking
     if ('geolocation' in navigator) {
       setGpsStatus('requesting');
@@ -713,8 +772,10 @@ function LiveCapture({ onSaveCurve, onBack }) {
             const cutoff = performance.now() - 30000;
             gpsRef.current.speeds = gpsRef.current.speeds.filter(s => s.time > cutoff);
             const rec = recordingRef.current;
-            if (rec) rec.gps.push({ t: gpsTime, speed: pos.coords.speed });
-            sendBufferRef.current.gps.push({ t: gpsTime, speed: pos.coords.speed });
+            const gpsSample = { t: gpsTime, speed: pos.coords.speed };
+            if (rec) rec.gps.push(gpsSample);
+            sendBufferRef.current.gps.push(gpsSample);
+            persistBufferRef.current.gps.push(gpsSample);
           }
           setGpsStatus('active');
         },
@@ -726,12 +787,9 @@ function LiveCapture({ onSaveCurve, onBack }) {
       setGpsStatus('unavailable');
     }
 
-    // Request screen wake lock so the phone stays awake while rowing
-    try {
-      if ('wakeLock' in navigator) {
-        wakeLockRef.current = await navigator.wakeLock.request('screen');
-      }
-    } catch { /* wake lock not supported or denied — non-critical */ }
+    // Keep the screen awake while rowing — re-acquired automatically if the
+    // phone blinks off during the hand-off into the boat.
+    wakeLock.request();
   };
 
   const stopCapture = () => {
@@ -759,10 +817,90 @@ function LiveCapture({ onSaveCurve, onBack }) {
       sendIntervalRef.current = null;
     }
     linkSendData({ type: 'capture', active: false });
-    wakeLockRef.current?.release().catch(() => {});
-    wakeLockRef.current = null;
+    wakeLock.release();
+    // Clean stop: flush the tail, then clear the recovery copy so we don't
+    // prompt to recover a session the rower already finished.
+    if (persistIntervalRef.current != null) {
+      clearInterval(persistIntervalRef.current);
+      persistIntervalRef.current = null;
+    }
+    sessionStore.clear().catch(() => {});
     const rec = recordingRef.current;
     if (rec && rec.motion.length > 0) setHasRecording(true);
+  };
+
+  // Auto-start so the coach can hand over a phone that's already capturing —
+  // no tap required. Fires once per mount, only for the rower, only once
+  // sensors are ready, and never over a pending recovery offer or an existing
+  // session. On iOS the first capture still needs a tap to grant motion access
+  // (requestPermission must follow a user gesture); after that this kicks in.
+  const autoStartedRef = useRef(false);
+  useEffect(() => {
+    if (autoStartedRef.current) return;
+    if (!recoveryChecked) return; // don't wipe a recoverable session by starting
+    if (linkRole !== 'rower') return;
+    if (sensorStatus !== 'available') return;
+    if (isCapturing || hasRecording || strokeCount > 0) return;
+    if (recoverable) return;
+    autoStartedRef.current = true;
+    startCapture();
+    // startCapture is stable enough for this one-shot guarded effect; deps are
+    // the readiness signals that gate it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linkRole, sensorStatus, isCapturing, hasRecording, strokeCount, recoverable, recoveryChecked]);
+
+  // --- Accidental-exit guard (while capturing) ---
+  // The phone gets jostled into the boat; a stray tap or back-swipe must not
+  // kill the session. beforeunload covers reload / close / PWA dismiss; the
+  // history sentinel turns a back gesture into a no-op + hint instead of
+  // unmounting the page.
+  const [navHint, setNavHint] = useState(false);
+  const navHintTimerRef = useRef(null);
+  useEffect(() => {
+    if (!isCapturing) return;
+    const onBeforeUnload = (e) => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', onBeforeUnload);
+
+    window.history.pushState({ liveTrap: true }, '');
+    const onPop = () => {
+      window.history.pushState({ liveTrap: true }, '');
+      setNavHint(true);
+      if (navHintTimerRef.current) clearTimeout(navHintTimerRef.current);
+      navHintTimerRef.current = setTimeout(() => setNavHint(false), 2600);
+    };
+    window.addEventListener('popstate', onPop);
+    return () => {
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      window.removeEventListener('popstate', onPop);
+      if (navHintTimerRef.current) clearTimeout(navHintTimerRef.current);
+    };
+  }, [isCapturing]);
+
+  // --- Hold-to-stop ---
+  // A single tap can't end capture; the stop control must be held for ~1s so a
+  // fumble while handling the phone doesn't kill the recording.
+  const HOLD_STOP_MS = 1000;
+  const [holdPct, setHoldPct] = useState(0);
+  const holdRafRef = useRef(null);
+  const holdStartRef = useRef(0);
+  const cancelHoldStop = () => {
+    if (holdRafRef.current) cancelAnimationFrame(holdRafRef.current);
+    holdRafRef.current = null;
+    setHoldPct(0);
+  };
+  const beginHoldStop = () => {
+    holdStartRef.current = performance.now();
+    const tick = () => {
+      const pct = Math.min(100, ((performance.now() - holdStartRef.current) / HOLD_STOP_MS) * 100);
+      setHoldPct(pct);
+      if (pct >= 100) {
+        cancelHoldStop();
+        stopCapture();
+      } else {
+        holdRafRef.current = requestAnimationFrame(tick);
+      }
+    };
+    holdRafRef.current = requestAnimationFrame(tick);
   };
 
   const downloadRecording = () => {
@@ -1410,6 +1548,24 @@ function LiveCapture({ onSaveCurve, onBack }) {
 
       {linkPanel}
 
+      {recoverable && !isLive && (
+        <div className="live-recover">
+          <span className="live-recover-text">
+            A previous capture ({recoverable.motion.length.toLocaleString()} samples) didn't finish.
+          </span>
+          <div className="live-recover-actions">
+            <button className="btn btn-primary btn-sm" onClick={recoverSession}>Recover</button>
+            <button className="btn btn-secondary btn-sm" onClick={discardRecoverable}>Discard</button>
+          </div>
+        </div>
+      )}
+
+      {navHint && (
+        <div className="live-nav-hint" role="status">
+          Capture is running — hold <strong>Stop</strong> to end it.
+        </div>
+      )}
+
       {linkRole === 'coach' ? (
         <>
           <div className="live-guide">
@@ -1498,8 +1654,18 @@ function LiveCapture({ onSaveCurve, onBack }) {
                     {strokeCount > 0 ? 'Restart Capture' : 'Start Capture'}
                   </button>
                 ) : (
-                  <button className="btn btn-large live-stop-btn" onClick={stopCapture}>
-                    Stop Capture
+                  <button
+                    className="btn btn-large live-stop-btn"
+                    onPointerDown={beginHoldStop}
+                    onPointerUp={cancelHoldStop}
+                    onPointerLeave={cancelHoldStop}
+                    onPointerCancel={cancelHoldStop}
+                    onContextMenu={(e) => e.preventDefault()}
+                    style={holdPct > 0 ? {
+                      background: `linear-gradient(to right, #7f1d1d ${holdPct}%, #dc2626 ${holdPct}%)`,
+                    } : undefined}
+                  >
+                    {holdPct > 0 ? 'Keep holding to stop…' : 'Hold to Stop'}
                   </button>
                 )}
                 {!isCapturing && sessionActions}
