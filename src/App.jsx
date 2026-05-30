@@ -231,8 +231,8 @@ function App() {
         </p>
         <div className="header-links">
           <a href="#live" className="live-capture-link">Live Stroke Capture</a>
-          <a href="#oar" className="live-capture-link">Oar Capture</a>
           <a href="#tradeoffs" className="live-capture-link">Tradeoffs</a>
+          {/* Oar Capture is hidden from users; reach it by navigating to #oar directly. */}
         </div>
       </header>
 
