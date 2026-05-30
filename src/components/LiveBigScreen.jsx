@@ -28,18 +28,18 @@ function LiveBigScreen({ splitText, strokeRate, chartData, hasGPSAnchoring, onCl
   const c = THEMES[theme];
   const rootRef = useRef(null);
 
-  // Go true full-screen + lock to landscape where the platform allows it.
-  // iOS Safari supports neither for non-video elements; the fixed-position
-  // overlay still covers the viewport (and the whole screen as an installed
-  // PWA), so this degrades gracefully — it just keeps the browser chrome.
+  // Go true full-screen where the platform allows it. The view works in both
+  // orientations (numbers beside the graph in landscape, above it in portrait),
+  // so we don't lock orientation — it follows the phone. iOS Safari supports
+  // full-screen for non-video elements; the fixed-position overlay still covers
+  // the viewport (and the whole screen as an installed PWA), so this degrades
+  // gracefully — it just keeps the browser chrome.
   useEffect(() => {
     const el = rootRef.current;
     (async () => {
       try { if (el?.requestFullscreen) await el.requestFullscreen(); } catch { /* ignore */ }
-      try { await window.screen?.orientation?.lock?.('landscape'); } catch { /* ignore */ }
     })();
     return () => {
-      try { window.screen?.orientation?.unlock?.(); } catch { /* ignore */ }
       try { if (document.fullscreenElement) document.exitFullscreen(); } catch { /* ignore */ }
     };
   }, []);
@@ -125,10 +125,6 @@ function LiveBigScreen({ splitText, strokeRate, chartData, hasGPSAnchoring, onCl
 
       <div className="bigscreen-graph">
         <Line data={bigData} options={bigOptions} />
-      </div>
-
-      <div className="bigscreen-rotate" style={{ background: c.bg, color: c.fg }}>
-        Rotate your phone to landscape
       </div>
     </div>
   );

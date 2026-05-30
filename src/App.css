@@ -1358,8 +1358,6 @@ html.live-mode body {
   inset: 0;
   z-index: 1000;
   display: flex;
-  flex-direction: row;
-  align-items: stretch;
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   box-sizing: border-box;
   -webkit-user-select: none;
@@ -1390,22 +1388,14 @@ html.live-mode body {
   cursor: pointer;
 }
 
-/* Left column: the two numbers that matter, sized to fill the height. */
 .bigscreen-metrics {
-  flex: 0 0 40%;
   display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: flex-start;
-  gap: 4vh;
-  padding-left: 4vw;
   min-width: 0;
 }
 
 .bigscreen-metric {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
   min-width: 0;
 }
 
@@ -1416,52 +1406,58 @@ html.live-mode body {
   letter-spacing: -0.02em;
 }
 
-.bigscreen-split {
-  font-size: clamp(3rem, 20vh, 12rem);
-}
-
-.bigscreen-spm {
-  font-size: clamp(2.5rem, 16vh, 10rem);
-}
-
 .bigscreen-label {
-  font-size: clamp(0.9rem, 3.5vh, 2rem);
+  font-size: clamp(0.9rem, 3.5vmin, 2rem);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.12em;
   margin-top: 0.4vh;
 }
 
-/* Right side: the stroke speed profile fills the remaining space. */
+/* The stroke speed profile fills whatever space the numbers don't take. */
 .bigscreen-graph {
   flex: 1 1 auto;
   min-width: 0;
-  padding: 4vh 3vw 4vh 1vw;
+  min-height: 0;
   box-sizing: border-box;
 }
 
-.bigscreen-rotate {
-  display: none;
+/* Landscape: numbers stacked on the left, profile fills the right. Height is
+   the binding dimension, so size the digits in vh. */
+@media (orientation: landscape) {
+  .bigscreen { flex-direction: row; align-items: stretch; }
+  .bigscreen-metrics {
+    flex: 0 0 40%;
+    flex-direction: column;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 4vh;
+    padding-left: 4vw;
+  }
+  .bigscreen-metric { align-items: flex-start; }
+  .bigscreen-split { font-size: clamp(3rem, 20vh, 12rem); }
+  .bigscreen-spm { font-size: clamp(2.5rem, 16vh, 10rem); }
+  .bigscreen-graph { padding: 4vh 3vw 4vh 1vw; }
 }
 
-/* In portrait the layout is too cramped to read; ask the rower to rotate.
-   (Where orientation-lock is supported this is never seen.) */
+/* Portrait: numbers side by side across the top, profile fills below. Width is
+   the binding dimension, so size the digits in vw. */
 @media (orientation: portrait) {
-  .bigscreen-metrics,
-  .bigscreen-graph {
-    display: none;
+  .bigscreen { flex-direction: column; }
+  .bigscreen-metrics {
+    flex: 0 0 auto;
+    width: 100%;
+    flex-direction: row;
+    justify-content: space-around;
+    align-items: flex-end;
+    gap: 4vw;
+    padding: 3vh 4vw 1vh;
+    box-sizing: border-box;
   }
-  .bigscreen-rotate {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    padding: 2rem;
-    font-size: clamp(1.5rem, 6vw, 3rem);
-    font-weight: 700;
-  }
+  .bigscreen-metric { align-items: center; }
+  .bigscreen-split { font-size: clamp(3rem, 19vw, 9rem); }
+  .bigscreen-spm { font-size: clamp(2.5rem, 16vw, 7rem); }
+  .bigscreen-graph { width: 100%; padding: 1vh 3vw 4vh; }
 }
 
 /* Two-thumb range slider (touch-friendly stroke-range selector). Two native
