@@ -27,6 +27,12 @@ const MAX_STROKE_MS = 4000;
 const MAX_STROKES = 500;          // Rolling window for averaging
 const UI_UPDATE_MS = 250;
 const CALIBRATION_MS = 3000;      // Auto-orientation calibration window
+// Continuous orientation re-evaluation (handles a mid-session remount / handoff)
+const ORIENT_WINDOW_MS = 5000;    // rolling variance window (covers a stroke+)
+const ORIENT_REEVAL_MS = 1000;    // recompute the dominant axis at most this often
+const ORIENT_SWITCH_MS = 2500;    // a new axis/sign must persist this long to commit
+const ORIENT_SWITCH_RATIO = 1.5;  // a new axis must beat the current one by this factor
+const ORIENT_MIN_VAR = 0.5;       // below this variance = no real motion; don't switch
 const SEND_BATCH_MS = 100;        // Batch outgoing samples this often when coach-linked
 const PERSIST_FLUSH_MS = 2000;    // Flush new samples to IndexedDB this often (crash recovery)
 const SPLIT_WINDOW_MS = 5000;     // GPS-speed averaging window for per-stroke split
@@ -73,6 +79,24 @@ function variance(arr) {
   if (arr.length === 0) return 0;
   const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
   return arr.reduce((s, v) => s + (v - mean) ** 2, 0) / arr.length;
+}
+
+// Identify the boat's surge axis: whichever of x/y/z carries the most motion
+// (variance), with sign taken from the largest spike (the drive's forward push).
+// Shared by the initial 3 s calibration and the continuous re-evaluation so a
+// mid-session remount lands on the same logic. Returns per-axis vars too, for
+// the caller's magnitude-based switch gating.
+function dominantAxis(x, y, z) {
+  const vars = { x: variance(x), y: variance(y), z: variance(z) };
+  const maxVar = Math.max(vars.x, vars.y, vars.z);
+  const axis = vars.x === maxVar ? 'x' : vars.y === maxVar ? 'y' : 'z';
+  const a = axis === 'x' ? x : axis === 'y' ? y : z;
+  let maxAbsIdx = 0;
+  for (let i = 1; i < a.length; i++) {
+    if (Math.abs(a[i]) > Math.abs(a[maxAbsIdx])) maxAbsIdx = i;
+  }
+  const sign = Math.sign(a[maxAbsIdx]) || 1;
+  return { axis, sign, maxVar, vars };
 }
 
 function processStroke(samples) {
@@ -365,33 +389,83 @@ function LiveCapture({ onSaveCurve, onBack }) {
       proc.calibration.samples.z.push(accelValues.z ?? 0);
 
       if (now - proc.calibration.startTime >= CALIBRATION_MS) {
-        const varX = variance(proc.calibration.samples.x);
-        const varY = variance(proc.calibration.samples.y);
-        const varZ = variance(proc.calibration.samples.z);
-        // All three axes considered: boat-motion axis is whichever has the
-        // largest variance, regardless of how the phone is mounted.
-        const maxVar = Math.max(varX, varY, varZ);
+        const c = proc.calibration.samples;
+        // Boat-motion axis is whichever has the largest variance, regardless of
+        // how the phone is mounted; sign from the drive's largest spike.
+        const { axis, sign, maxVar } = dominantAxis(c.x, c.y, c.z);
 
-        if (maxVar < 0.5) {
+        if (maxVar < ORIENT_MIN_VAR) {
           // No meaningful motion yet — extend calibration
           proc.calibration.startTime = now;
           proc.calibration.samples = { x: [], y: [], z: [] };
           return;
         }
 
-        const axis = varX === maxVar ? 'x' : varY === maxVar ? 'y' : 'z';
-        const samples = proc.calibration.samples[axis];
-        // Sign: the largest absolute spike is from the drive (forward push)
-        const maxAbsIdx = samples.reduce(
-          (best, v, i) => Math.abs(v) > Math.abs(samples[best]) ? i : best, 0
-        );
-        const sign = Math.sign(samples[maxAbsIdx]) || 1;
-
         axisRef.current = { axis, sign };
         proc.calibration.done = true;
         proc.detectedOrientation = { axis, sign };
       }
       return; // Don't process strokes during calibration
+    }
+
+    // --- Continuous orientation tracking ---
+    // The surge axis can change mid-session if the phone is moved or handed to
+    // another rower. Rather than trusting the one-shot calibration, keep a
+    // rolling-variance read on all three axes and switch axis/sign when a
+    // different one clearly and persistently dominates. (Gravity-vector tracking
+    // would be the obvious tell, but rough water swamps it — motion variance
+    // doesn't care about chop, only about which axis the stroke rhythm lives on.)
+    const ori = proc.orient;
+    ori.window.push({
+      t: now,
+      x: accelValues.x ?? 0,
+      y: accelValues.y ?? 0,
+      z: accelValues.z ?? 0,
+    });
+    const wcut = now - ORIENT_WINDOW_MS;
+    while (ori.window.length && ori.window[0].t < wcut) ori.window.shift();
+
+    if (
+      now - ori.lastEval >= ORIENT_REEVAL_MS &&
+      ori.window.length >= 20 &&
+      now - ori.window[0].t >= ORIENT_WINDOW_MS / 2
+    ) {
+      ori.lastEval = now;
+      const w = ori.window;
+      const cand = dominantAxis(w.map(s => s.x), w.map(s => s.y), w.map(s => s.z));
+      const cur = axisRef.current;
+      const axisChanged = cand.axis !== cur.axis;
+      const signChanged = cand.sign !== cur.sign;
+      // An axis change must clearly beat the incumbent (avoids flip-flop when two
+      // axes carry similar motion, e.g. a phone wedged at ~45°). A sign-only flip
+      // on the same axis has equal variance, so it rides on persistence alone.
+      const dominates =
+        !axisChanged ||
+        cand.vars[cand.axis] >= ORIENT_SWITCH_RATIO * (cand.vars[cur.axis] || 1e-9);
+
+      if (cand.maxVar >= ORIENT_MIN_VAR && (axisChanged || signChanged) && dominates) {
+        const samePending =
+          ori.pending && ori.pending.axis === cand.axis && ori.pending.sign === cand.sign;
+        if (samePending && now - ori.pendingSince >= ORIENT_SWITCH_MS) {
+          // Commit the new orientation and reset stroke detection so the
+          // transition (and the handoff jostle) isn't measured as a stroke.
+          axisRef.current = { axis: cand.axis, sign: cand.sign };
+          proc.detectedOrientation = { axis: cand.axis, sign: cand.sign };
+          ori.pending = null;
+          const r = (accelValues[cand.axis] ?? 0) * cand.sign;
+          proc.filteredAccel = r;
+          proc.strokeDetect = r;
+          proc.prevStrokeDetect = r;
+          proc.buffer = [];
+          proc.lastBoundaryTime = now;
+          calibSentRef.current = false; // re-send calibration to a linked coach
+        } else if (!samePending) {
+          ori.pending = { axis: cand.axis, sign: cand.sign };
+          ori.pendingSince = now;
+        }
+      } else {
+        ori.pending = null;
+      }
     }
 
     const { axis, sign } = axisRef.current;
@@ -479,6 +553,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     hasGPS: false,
     detectedOrientation: null,
     calibration: { startTime, samples: { x: [], y: [], z: [] }, done: false },
+    orient: { window: [], lastEval: 0, pending: null, pendingSince: 0 },
   });
 
   const startWatch = () => {
