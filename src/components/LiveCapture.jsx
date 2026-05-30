@@ -544,9 +544,15 @@ function LiveCapture({ onSaveCurve, onBack }) {
           const gpsSpeed = proc.hasGPS
             ? windowedGpsSpeed(gps, now, Math.max(elapsed, SPLIT_WINDOW_MS))
             : null;
-          // Activity gate: only record while the boat is actually rowing — a GPS
-          // split inside the band. Requires GPS; pauses and auto-resumes.
-          const rowing = gpsSpeed != null && gpsSpeed >= MIN_ROW_SPEED && gpsSpeed <= MAX_ROW_SPEED;
+          // Activity gate. With GPS present, only record while the boat is
+          // actually rowing — a 500m split inside the band — pausing and
+          // auto-resuming otherwise. With no GPS at all (a relative-mode
+          // recording) there's no split to gate on: record on replay/fed data,
+          // but stay idle for live capture, where GPS is required.
+          const hasGpsData = gps && gps.length > 0;
+          const rowing = hasGpsData
+            ? (gpsSpeed != null && gpsSpeed >= MIN_ROW_SPEED && gpsSpeed <= MAX_ROW_SPEED)
+            : nowOverride != null;
           if (rowing) {
             const avgSpeed = curve.reduce((a, b) => a + b, 0) / curve.length;
             proc.strokes.push({ time: now, curve, avgSpeed, gpsSpeed });
@@ -910,7 +916,14 @@ function LiveCapture({ onSaveCurve, onBack }) {
             const cutoff = performance.now() - 30000;
             gpsRef.current.speeds = gpsRef.current.speeds.filter(s => s.time > cutoff);
             const rec = recordingRef.current;
+            // Record position too (when available) so a session can later be
+            // drawn on a map. Only speed feeds the live split pipeline; lat/lon
+            // ride along in the recording / stream / persistence.
             const gpsSample = { t: gpsTime, speed: pos.coords.speed };
+            if (pos.coords.latitude != null) {
+              gpsSample.lat = pos.coords.latitude;
+              gpsSample.lon = pos.coords.longitude;
+            }
             if (rec) rec.gps.push(gpsSample);
             sendBufferRef.current.gps.push(gpsSample);
             persistBufferRef.current.gps.push(gpsSample);
