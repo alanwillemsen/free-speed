@@ -27,16 +27,25 @@ const MAX_STROKE_MS = 4000;
 const MAX_STROKES = 500;          // Rolling window for averaging
 const UI_UPDATE_MS = 250;
 const CALIBRATION_MS = 3000;      // Auto-orientation calibration window
-// Continuous orientation re-evaluation (handles a mid-session remount / handoff)
-const ORIENT_WINDOW_MS = 5000;    // rolling variance window (covers a stroke+)
-const ORIENT_REEVAL_MS = 1000;    // recompute the dominant axis at most this often
-const ORIENT_SWITCH_MS = 2500;    // a new axis/sign must persist this long to commit
-const ORIENT_SWITCH_RATIO = 1.5;  // a new axis must beat the current one by this factor
-const ORIENT_MIN_VAR = 0.5;       // below this variance = no real motion; don't switch
+// Continuous orientation re-evaluation (handles a mid-session remount / handoff).
+// The boat-motion direction is tracked as a free 3D vector (the PCA principal
+// axis of acceleration), so any mounting angle works — not just the device's
+// x/y/z faces. Small shifts are followed smoothly; a large, sustained jump is
+// treated as a remount and snaps (resetting stroke detection).
+const ORIENT_WINDOW_MS = 5000;    // rolling window for the direction estimate (a stroke+)
+const ORIENT_REEVAL_MS = 1000;    // recompute the motion direction at most this often
+const ORIENT_SWITCH_MS = 2500;    // a remount must persist this long before we snap to it
+const ORIENT_SWITCH_DEG = 35;     // direction jump beyond this = remount, not drift
+const ORIENT_MIN_VAR = 0.5;       // below this variance = no real motion; don't update
 const SEND_BATCH_MS = 100;        // Batch outgoing samples this often when coach-linked
 const PERSIST_FLUSH_MS = 2000;    // Flush new samples to IndexedDB this often (crash recovery)
 const SPLIT_WINDOW_MS = 5000;     // GPS-speed averaging window for per-stroke split
-const SPLIT_MAX_SPEED = 12;       // m/s sanity bound — drop GPS speed spikes
+// Rowing happens only within this 500m-split band. Outside it the boat is
+// drifting/stopped (slower than 4:00) or the reading is a GPS spike (faster than
+// 1:00). Capture pauses outside the band and auto-resumes inside it; a valid
+// in-band GPS speed is required to record at all.
+const MIN_ROW_SPEED = 500 / 240;  // 2.08 m/s — a 4:00 /500m split
+const MAX_ROW_SPEED = 500 / 60;   // 8.33 m/s — a 1:00 /500m split
 
 const PHASE_TIMES = Array.from({ length: NUM_POINTS }, (_, i) => i / (NUM_POINTS - 1));
 const REF_SPEEDS = referenceCurveData.speeds;
@@ -81,22 +90,55 @@ function variance(arr) {
   return arr.reduce((s, v) => s + (v - mean) ** 2, 0) / arr.length;
 }
 
-// Identify the boat's surge axis: whichever of x/y/z carries the most motion
-// (variance), with sign taken from the largest spike (the drive's forward push).
-// Shared by the initial 3 s calibration and the continuous re-evaluation so a
-// mid-session remount lands on the same logic. Returns per-axis vars too, for
-// the caller's magnitude-based switch gating.
-function dominantAxis(x, y, z) {
-  const vars = { x: variance(x), y: variance(y), z: variance(z) };
-  const maxVar = Math.max(vars.x, vars.y, vars.z);
-  const axis = vars.x === maxVar ? 'x' : vars.y === maxVar ? 'y' : 'z';
-  const a = axis === 'x' ? x : axis === 'y' ? y : z;
-  let maxAbsIdx = 0;
-  for (let i = 1; i < a.length; i++) {
-    if (Math.abs(a[i]) > Math.abs(a[maxAbsIdx])) maxAbsIdx = i;
+// Identify the boat's fore-aft (surge) direction as a free 3D unit vector: the
+// principal axis of the acceleration cloud — the direction along which motion
+// varies most. Found by power-iterating the 3×3 covariance, so it works at any
+// mounting angle, not just when an axis happens to line up with the boat.
+// Shared by the initial calibration and the continuous re-evaluation. Returns a
+// signed unit vector (oriented so the drive's biggest spike reads positive) plus
+// the variance along it (for the "is the boat really moving" gate). `warm` seeds
+// the iteration with the previous direction for fast, continuous convergence.
+function principalDirection(x, y, z, warm) {
+  const n = x.length;
+  if (n < 2) return null;
+  // Mean-center so any residual gravity DC can't bias the direction.
+  let mx = 0, my = 0, mz = 0;
+  for (let i = 0; i < n; i++) { mx += x[i]; my += y[i]; mz += z[i]; }
+  mx /= n; my /= n; mz /= n;
+  // Covariance matrix (symmetric — six unique entries).
+  let cxx = 0, cyy = 0, czz = 0, cxy = 0, cxz = 0, cyz = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = x[i] - mx, dy = y[i] - my, dz = z[i] - mz;
+    cxx += dx * dx; cyy += dy * dy; czz += dz * dz;
+    cxy += dx * dy; cxz += dx * dz; cyz += dy * dz;
   }
-  const sign = Math.sign(a[maxAbsIdx]) || 1;
-  return { axis, sign, maxVar, vars };
+  cxx /= n; cyy /= n; czz /= n; cxy /= n; cxz /= n; cyz /= n;
+  // Power iteration → dominant eigenvector (the principal direction).
+  let vx = warm?.x ?? 1, vy = warm?.y ?? 0, vz = warm?.z ?? 0;
+  let lambda = 0;
+  for (let it = 0; it < 24; it++) {
+    const nx = cxx * vx + cxy * vy + cxz * vz;
+    const ny = cxy * vx + cyy * vy + cyz * vz;
+    const nz = cxz * vx + cyz * vy + czz * vz;
+    const mag = Math.hypot(nx, ny, nz);
+    if (mag < 1e-12) break;
+    vx = nx / mag; vy = ny / mag; vz = nz / mag;
+    lambda = mag; // ≈ variance along v (Rayleigh quotient, v is unit)
+  }
+  // Orient the vector so the drive (largest excursion) projects positive.
+  let maxAbs = 0, signedMax = 1;
+  for (let i = 0; i < n; i++) {
+    const p = (x[i] - mx) * vx + (y[i] - my) * vy + (z[i] - mz) * vz;
+    if (Math.abs(p) > maxAbs) { maxAbs = Math.abs(p); signedMax = p; }
+  }
+  if (signedMax < 0) { vx = -vx; vy = -vy; vz = -vz; }
+  return { dir: { x: vx, y: vy, z: vz }, variance: lambda };
+}
+
+// Angle (degrees) between two unit vectors.
+function angleBetween(a, b) {
+  const dot = Math.max(-1, Math.min(1, a.x * b.x + a.y * b.y + a.z * b.z));
+  return Math.acos(dot) * 180 / Math.PI;
 }
 
 function processStroke(samples) {
@@ -200,7 +242,7 @@ function windowedGpsSpeed(gpsSpeeds, endTime, windowMs) {
   const start = endTime - windowMs;
   let sum = 0, n = 0;
   for (const g of gpsSpeeds) {
-    if (g.time >= start && g.time <= endTime && g.speed > 0 && g.speed < SPLIT_MAX_SPEED) {
+    if (g.time >= start && g.time <= endTime && g.speed > 0 && g.speed < MAX_ROW_SPEED) {
       sum += g.speed;
       n++;
     }
@@ -239,20 +281,6 @@ function freeSpeedGain(yourCurve, potentialCurve) {
   return scale * mean(potentialCurve) - mean(yourCurve);
 }
 
-// --- Orientation labels for display ---
-const ORIENTATION_LABELS = {
-  'x+': 'Landscape — right toward bow',
-  'x-': 'Landscape — left toward bow',
-  'y+': 'Portrait — top toward bow',
-  'y-': 'Portrait — bottom toward bow',
-  'z+': 'Upright — back of phone toward bow',
-  'z-': 'Upright — screen toward bow',
-};
-
-function orientationLabel(axis, sign) {
-  return ORIENTATION_LABELS[`${axis}${sign > 0 ? '+' : '-'}`] || `${axis}-axis`;
-}
-
 // --- Component ---
 
 function LiveCapture({ onSaveCurve, onBack }) {
@@ -278,7 +306,9 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const [avgCurve, setAvgCurve] = useState(null);
   const [liveSplitSpeed, setLiveSplitSpeed] = useState(null); // GPS speed (m/s) of the latest stroke
   const [calibrationStatus, setCalibrationStatus] = useState('idle'); // idle | calibrating | detected
-  const [detectedOrientation, setDetectedOrientation] = useState(null);
+  // Whether the boat is currently rowing (GPS split within the rowing band).
+  // Capture pauses while false and auto-resumes when it goes true.
+  const [isActive, setIsActive] = useState(false);
   const [gpsStatus, setGpsStatus] = useState('idle'); // idle | requesting | active | unavailable
   const [hasGPSAnchoring, setHasGPSAnchoring] = useState(false);
   const [hasRecording, setHasRecording] = useState(false);
@@ -294,7 +324,9 @@ function LiveCapture({ onSaveCurve, onBack }) {
 
   // Processing state lives in refs to avoid stale closures in the 60 Hz handler
   const procRef = useRef(null);
-  const axisRef = useRef({ axis: 'y', sign: 1 });
+  // Boat fore-aft direction in device frame (unit vector). Default points along
+  // +y until calibration locks it; updated continuously while rowing.
+  const dirRef = useRef({ x: 0, y: 1, z: 0 });
   const orientationRef = useRef({ beta: 0, gamma: 0 });
   const gpsRef = useRef({ speeds: [], watchId: null });
   const recordingRef = useRef(null);
@@ -390,31 +422,34 @@ function LiveCapture({ onSaveCurve, onBack }) {
 
       if (now - proc.calibration.startTime >= CALIBRATION_MS) {
         const c = proc.calibration.samples;
-        // Boat-motion axis is whichever has the largest variance, regardless of
-        // how the phone is mounted; sign from the drive's largest spike.
-        const { axis, sign, maxVar } = dominantAxis(c.x, c.y, c.z);
+        // Lock the boat's fore-aft direction from the motion so far — any
+        // mounting angle, no axis assumptions.
+        const pd = principalDirection(c.x, c.y, c.z);
 
-        if (maxVar < ORIENT_MIN_VAR) {
+        if (!pd || pd.variance < ORIENT_MIN_VAR) {
           // No meaningful motion yet — extend calibration
           proc.calibration.startTime = now;
           proc.calibration.samples = { x: [], y: [], z: [] };
           return;
         }
 
-        axisRef.current = { axis, sign };
+        dirRef.current = pd.dir;
+        proc.direction = pd.dir;
         proc.calibration.done = true;
-        proc.detectedOrientation = { axis, sign };
       }
       return; // Don't process strokes during calibration
     }
 
+    proc.lastSampleTime = now;
+
     // --- Continuous orientation tracking ---
-    // The surge axis can change mid-session if the phone is moved or handed to
-    // another rower. Rather than trusting the one-shot calibration, keep a
-    // rolling-variance read on all three axes and switch axis/sign when a
-    // different one clearly and persistently dominates. (Gravity-vector tracking
-    // would be the obvious tell, but rough water swamps it — motion variance
-    // doesn't care about chop, only about which axis the stroke rhythm lives on.)
+    // The boat-motion direction can change mid-session if the phone is moved or
+    // handed to another rower. Keep a rolling window and re-estimate the
+    // principal direction periodically. A small change is followed smoothly
+    // (handles gradual shifts); a large, sustained change is treated as a
+    // remount and snaps, resetting stroke detection so the handoff isn't
+    // measured as a stroke. (Variance-based, so rough water doesn't fool it —
+    // chop has no consistent direction; the stroke rhythm does.)
     const ori = proc.orient;
     ori.window.push({
       t: now,
@@ -432,44 +467,43 @@ function LiveCapture({ onSaveCurve, onBack }) {
     ) {
       ori.lastEval = now;
       const w = ori.window;
-      const cand = dominantAxis(w.map(s => s.x), w.map(s => s.y), w.map(s => s.z));
-      const cur = axisRef.current;
-      const axisChanged = cand.axis !== cur.axis;
-      const signChanged = cand.sign !== cur.sign;
-      // An axis change must clearly beat the incumbent (avoids flip-flop when two
-      // axes carry similar motion, e.g. a phone wedged at ~45°). A sign-only flip
-      // on the same axis has equal variance, so it rides on persistence alone.
-      const dominates =
-        !axisChanged ||
-        cand.vars[cand.axis] >= ORIENT_SWITCH_RATIO * (cand.vars[cur.axis] || 1e-9);
-
-      if (cand.maxVar >= ORIENT_MIN_VAR && (axisChanged || signChanged) && dominates) {
-        const samePending =
-          ori.pending && ori.pending.axis === cand.axis && ori.pending.sign === cand.sign;
-        if (samePending && now - ori.pendingSince >= ORIENT_SWITCH_MS) {
-          // Commit the new orientation and reset stroke detection so the
-          // transition (and the handoff jostle) isn't measured as a stroke.
-          axisRef.current = { axis: cand.axis, sign: cand.sign };
-          proc.detectedOrientation = { axis: cand.axis, sign: cand.sign };
+      const cand = principalDirection(
+        w.map(s => s.x), w.map(s => s.y), w.map(s => s.z), dirRef.current
+      );
+      if (cand && cand.variance >= ORIENT_MIN_VAR) {
+        const drift = angleBetween(cand.dir, dirRef.current);
+        if (drift < ORIENT_SWITCH_DEG) {
+          // Normal drift — follow it, no reset.
+          dirRef.current = cand.dir;
+          proc.direction = cand.dir;
           ori.pending = null;
-          const r = (accelValues[cand.axis] ?? 0) * cand.sign;
-          proc.filteredAccel = r;
-          proc.strokeDetect = r;
-          proc.prevStrokeDetect = r;
-          proc.buffer = [];
-          proc.lastBoundaryTime = now;
-          calibSentRef.current = false; // re-send calibration to a linked coach
-        } else if (!samePending) {
-          ori.pending = { axis: cand.axis, sign: cand.sign };
-          ori.pendingSince = now;
+        } else {
+          // Large jump — candidate remount. Require it to hold before snapping.
+          const samePending = ori.pending && angleBetween(cand.dir, ori.pending) < ORIENT_SWITCH_DEG / 2;
+          if (samePending && now - ori.pendingSince >= ORIENT_SWITCH_MS) {
+            dirRef.current = cand.dir;
+            proc.direction = cand.dir;
+            ori.pending = null;
+            // Reset stroke detection so the handoff jostle isn't a stroke.
+            const r = (accelValues.x ?? 0) * cand.dir.x
+              + (accelValues.y ?? 0) * cand.dir.y
+              + (accelValues.z ?? 0) * cand.dir.z;
+            proc.filteredAccel = r;
+            proc.strokeDetect = r;
+            proc.prevStrokeDetect = r;
+            proc.buffer = [];
+            proc.lastBoundaryTime = now;
+            calibSentRef.current = false; // re-send direction to a linked coach
+          } else if (!samePending) {
+            ori.pending = cand.dir;
+            ori.pendingSince = now;
+          }
         }
-      } else {
-        ori.pending = null;
       }
     }
 
-    const { axis, sign } = axisRef.current;
-    const raw = (accelValues[axis] ?? 0) * sign;
+    const d = dirRef.current;
+    const raw = (accelValues.x ?? 0) * d.x + (accelValues.y ?? 0) * d.y + (accelValues.z ?? 0) * d.z;
 
     // Light EMA for noise reduction
     proc.filteredAccel += NOISE_ALPHA * (raw - proc.filteredAccel);
@@ -505,24 +539,29 @@ function LiveCapture({ onSaveCurve, onBack }) {
         }
 
         if (curve) {
-          const avgSpeed = curve.reduce((a, b) => a + b, 0) / curve.length;
           // Split comes from GPS (accurate absolute speed), not the IMU curve
           // mean (good for shape, drifty for magnitude). Smoothed over a window.
           const gpsSpeed = proc.hasGPS
             ? windowedGpsSpeed(gps, now, Math.max(elapsed, SPLIT_WINDOW_MS))
             : null;
-          proc.strokes.push({ time: now, curve, avgSpeed, gpsSpeed });
-          if (proc.strokes.length > MAX_STROKES) proc.strokes.shift();
-          proc.strokeCount++;
-          proc.lastStroke = curve;
-          proc.lastGpsSpeed = gpsSpeed;
-          proc.avgCurve = averageCurves(proc.strokes);
+          // Activity gate: only record while the boat is actually rowing — a GPS
+          // split inside the band. Requires GPS; pauses and auto-resumes.
+          const rowing = gpsSpeed != null && gpsSpeed >= MIN_ROW_SPEED && gpsSpeed <= MAX_ROW_SPEED;
+          if (rowing) {
+            const avgSpeed = curve.reduce((a, b) => a + b, 0) / curve.length;
+            proc.strokes.push({ time: now, curve, avgSpeed, gpsSpeed });
+            if (proc.strokes.length > MAX_STROKES) proc.strokes.shift();
+            proc.strokeCount++;
+            proc.lastStroke = curve;
+            proc.lastGpsSpeed = gpsSpeed;
+            proc.avgCurve = averageCurves(proc.strokes);
 
-          proc.boundaryTimes.push(now);
-          if (proc.boundaryTimes.length > 10) proc.boundaryTimes.shift();
-          if (proc.boundaryTimes.length >= 2) {
-            const ct = proc.boundaryTimes;
-            proc.strokeRate = Math.round(60000 / ((ct[ct.length - 1] - ct[0]) / (ct.length - 1)));
+            proc.boundaryTimes.push(now);
+            if (proc.boundaryTimes.length > 10) proc.boundaryTimes.shift();
+            if (proc.boundaryTimes.length >= 2) {
+              const ct = proc.boundaryTimes;
+              proc.strokeRate = Math.round(60000 / ((ct[ct.length - 1] - ct[0]) / (ct.length - 1)));
+            }
           }
         }
       }
@@ -551,7 +590,8 @@ function LiveCapture({ onSaveCurve, onBack }) {
     lastGpsSpeed: null,
     avgCurve: null,
     hasGPS: false,
-    detectedOrientation: null,
+    lastSampleTime: 0,
+    direction: null,
     calibration: { startTime, samples: { x: [], y: [], z: [] }, done: false },
     orient: { window: [], lastEval: 0, pending: null, pendingSince: 0 },
   });
@@ -560,7 +600,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     // startTime null → set from the first received motion sample, so coach-side
     // calibration spans the right window if the rower wasn't calibrated yet.
     procRef.current = makeProc(null);
-    axisRef.current = { axis: 'y', sign: 1 };
+    dirRef.current = { x: 0, y: 1, z: 0 };
     orientationRef.current = { beta: 0, gamma: 0 };
     gpsRef.current.speeds = [];
     recordingRef.current = {
@@ -577,7 +617,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     setAvgCurve(null);
     setLiveSplitSpeed(null);
     setCalibrationStatus('calibrating');
-    setDetectedOrientation(null);
+    setIsActive(false);
     setHasGPSAnchoring(false);
     setHasRecording(false);
     setStrokes([]);
@@ -644,10 +684,10 @@ function LiveCapture({ onSaveCurve, onBack }) {
         else stopWatch();
         break;
       case 'calib':
-        if (proc && msg.axis) {
-          axisRef.current = { axis: msg.axis, sign: msg.sign ?? 1 };
+        if (proc && msg.dir) {
+          dirRef.current = msg.dir;
+          proc.direction = msg.dir;
           proc.calibration.done = true;
-          proc.detectedOrientation = { axis: msg.axis, sign: msg.sign ?? 1 };
         }
         break;
       case 'motion':
@@ -699,12 +739,8 @@ function LiveCapture({ onSaveCurve, onBack }) {
     try {
       conn.send({ type: 'capture', active: true });
       const proc = procRef.current;
-      if (proc?.calibration?.done && proc.detectedOrientation) {
-        conn.send({
-          type: 'calib',
-          axis: proc.detectedOrientation.axis,
-          sign: proc.detectedOrientation.sign,
-        });
+      if (proc?.calibration?.done && proc.direction) {
+        conn.send({ type: 'calib', dir: proc.direction });
         calibSentRef.current = true;
       }
     } catch { /* ignore */ }
@@ -761,16 +797,18 @@ function LiveCapture({ onSaveCurve, onBack }) {
       setAvgCurve(proc.avgCurve);
       setHasGPSAnchoring(proc.hasGPS);
 
-      if (proc.calibration.done && proc.detectedOrientation) {
+      // Boat rowing? Use the latest processed sample time (works for both the
+      // rower's clock and a coach's stream of rower-stamped samples) so the
+      // idle indicator updates even when no strokes are being detected.
+      const ref = proc.lastSampleTime;
+      const spd = ref ? windowedGpsSpeed(gpsRef.current.speeds, ref, SPLIT_WINDOW_MS) : null;
+      setIsActive(spd != null && spd >= MIN_ROW_SPEED && spd <= MAX_ROW_SPEED);
+
+      if (proc.calibration.done && proc.direction) {
         setCalibrationStatus('detected');
-        setDetectedOrientation(proc.detectedOrientation);
-        // Rower: tell the coach which axis we locked onto, once.
+        // Rower: send the locked direction to the coach, and re-send after a remount.
         if (linkRole === 'rower' && linkIsOpen() && !calibSentRef.current) {
-          linkSendData({
-            type: 'calib',
-            axis: proc.detectedOrientation.axis,
-            sign: proc.detectedOrientation.sign,
-          });
+          linkSendData({ type: 'calib', dir: proc.direction });
           calibSentRef.current = true;
         }
       } else if (!proc.calibration.done) {
@@ -815,6 +853,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
 
   const startCapture = async () => {
     procRef.current = makeProc(performance.now());
+    dirRef.current = { x: 0, y: 1, z: 0 };
     recordingRef.current = {
       version: 1,
       startedAt: new Date().toISOString(),
@@ -833,7 +872,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     setAvgCurve(null);
     setLiveSplitSpeed(null);
     setCalibrationStatus('calibrating');
-    setDetectedOrientation(null);
+    setIsActive(false);
     setHasGPSAnchoring(false);
     setHasRecording(false);
     setStrokes([]);
@@ -1020,6 +1059,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
 
   const replayRecording = (recording) => {
     procRef.current = makeProc(recording.motion[0]?.t ?? 0);
+    dirRef.current = { x: 0, y: 1, z: 0 };
     gpsRef.current.speeds = [];
     orientationRef.current = { beta: 0, gamma: 0 };
 
@@ -1059,13 +1099,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     setLastStroke(proc.lastStroke);
     setAvgCurve(proc.avgCurve);
     setHasGPSAnchoring(proc.hasGPS);
-    if (proc.detectedOrientation) {
-      setCalibrationStatus('detected');
-      setDetectedOrientation(proc.detectedOrientation);
-    } else {
-      setCalibrationStatus('idle');
-      setDetectedOrientation(null);
-    }
+    setCalibrationStatus(proc.direction ? 'detected' : 'idle');
     setStrokes([...proc.strokes]);
     setSelection(null);
     setSelectedIndex(null);
@@ -1623,18 +1657,23 @@ function LiveCapture({ onSaveCurve, onBack }) {
     </div>
   );
 
-  const axisConfigView = (
+  // Activity indicator. Orientation is now tracked automatically as a free 3D
+  // direction, so there's nothing to show about it — what matters to the rower
+  // is whether capture is live (rowing) or paused (drifting / stopped / no GPS).
+  const activityView = (
     <div className="live-axis-config">
-      {calibrationStatus === 'detected' && detectedOrientation && (
-        <span className="live-orientation-detected">
-          {orientationLabel(detectedOrientation.axis, detectedOrientation.sign)}
+      {isLive && calibrationStatus === 'calibrating' && (
+        <span className="live-orientation-detecting">Detecting orientation…</span>
+      )}
+      {isLive && calibrationStatus !== 'calibrating' && isActive && (
+        <span className="live-orientation-detected">● Rowing</span>
+      )}
+      {isLive && calibrationStatus !== 'calibrating' && !isActive && (
+        <span className="live-orientation-idle">
+          {gpsStatus === 'unavailable' ? 'Paused — waiting for GPS…'
+            : gpsStatus === 'requesting' ? 'Paused — acquiring GPS…'
+            : 'Paused — waiting for the boat to move'}
         </span>
-      )}
-      {calibrationStatus === 'calibrating' && isLive && (
-        <span className="live-orientation-detecting">Detecting orientation...</span>
-      )}
-      {calibrationStatus === 'idle' && (
-        <span className="live-orientation-idle">Orientation auto-detected on capture</span>
       )}
     </div>
   );
@@ -1704,7 +1743,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
           {statsView}
           {chartView}
           {timeChartView}
-          {axisConfigView}
+          {activityView}
           <div className="live-actions">
             {isWatching && (
               isPaused ? (
@@ -1765,14 +1804,15 @@ function LiveCapture({ onSaveCurve, onBack }) {
           {sensorStatus === 'available' && (
             <>
               <div className="live-guide">
-                Mount your phone anywhere stable in the boat — flat, upright, or on
-                its side. Orientation is detected automatically; just start rowing.
+                Mount your phone anywhere stable in the boat, at any angle — the
+                direction is detected automatically. Capture pauses when you stop
+                rowing and resumes on its own, so warm-ups and rests don't count.
               </div>
 
               {statsView}
               {chartView}
               {timeChartView}
-              {axisConfigView}
+              {activityView}
 
               <div className="live-actions">
                 {!isCapturing ? (
