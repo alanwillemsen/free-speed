@@ -195,6 +195,26 @@ function averageCurves(strokes) {
   return avg;
 }
 
+// "Free speed" (m/s): the average boat speed you'd gain by matching the
+// potential curve's *shape* at your current effort. Drag power ∝ v³, so a given
+// average power (∝ mean of v³) yields the highest average speed when the speed
+// is steadiest — any variation costs speed (Jensen's inequality). We scale the
+// potential shape to your stroke's mean-cube (i.e. same power), then compare
+// average speeds. Same shape → 0 at any pace; the gain comes only from your
+// curve carrying more speed variation than the reference. Positive = speed left
+// on the table; negative = you're already smoother than potential (rare).
+// Both curves must be in real m/s, so this is GPS-anchored only.
+function freeSpeedGain(yourCurve, potentialCurve) {
+  if (!yourCurve || yourCurve.length === 0) return null;
+  const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
+  const meanCube = (a) => a.reduce((s, v) => s + v * v * v, 0) / a.length;
+  const yourPower = meanCube(yourCurve);
+  const potPower = meanCube(potentialCurve);
+  if (yourPower <= 0 || potPower <= 0) return null;
+  const scale = Math.cbrt(yourPower / potPower); // potential rescaled to your power
+  return scale * mean(potentialCurve) - mean(yourCurve);
+}
+
 // --- Orientation labels for display ---
 const ORIENTATION_LABELS = {
   'x+': 'Landscape — right toward bow',
@@ -1367,12 +1387,9 @@ function LiveCapture({ onSaveCurve, onBack }) {
   }
   const splitText = hasGPSAnchoring && displaySplitSpeed > 0 ? formatSplit(500 / displaySplitSpeed) : '—';
 
-  // Current split vs the "potential" reference curve, in seconds per 500m.
-  // Negative = ahead of potential pace, positive = behind. Only meaningful when
-  // GPS-anchored (without GPS the curve magnitude is normalised, not real m/s).
-  const splitDelta = hasGPSAnchoring && displaySplitSpeed > 0
-    ? 500 / displaySplitSpeed - 500 / REF_AVG
-    : null;
+  // Speed (m/s) available by matching the potential curve's shape at your
+  // current effort — see freeSpeedGain. Only meaningful when GPS-anchored.
+  const freeSpeed = hasGPSAnchoring ? freeSpeedGain(displayAvgCurve, REF_SPEEDS) : null;
 
   const statsView = (
     <div className="live-stats">
@@ -1563,7 +1580,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
       {bigScreen && (
         <LiveBigScreen
           splitText={splitText}
-          splitDelta={splitDelta}
+          freeSpeed={freeSpeed}
           strokeRate={strokeRate}
           chartData={chartData}
           hasGPSAnchoring={hasGPSAnchoring}
