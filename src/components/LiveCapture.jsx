@@ -1358,7 +1358,11 @@ function LiveCapture({ onSaveCurve, onBack }) {
     }
   };
 
-  const chartOptions = useMemo(() => ({
+  const chartOptions = useMemo(() => {
+   // Curves are stored phase-normalized (0..1) since strokes vary in length; the
+   // stroke rate gives the average period, so phase × period reads out as ms.
+   const periodMs = strokeRate > 0 ? 60000 / strokeRate : null;
+   return {
     responsive: true,
     maintainAspectRatio: false,
     animation: false,
@@ -1390,9 +1394,11 @@ function LiveCapture({ onSaveCurve, onBack }) {
         type: 'linear',
         min: 0,
         max: 1,
-        title: { display: true, text: 'Stroke Phase', font: { size: 12 } },
+        title: { display: true, text: periodMs ? 'Time (ms)' : 'Stroke Phase', font: { size: 12 } },
         ticks: {
-          callback: (val) => Math.round(val * 100) + '%',
+          callback: periodMs
+            ? (val) => Math.round(val * periodMs)
+            : (val) => Math.round(val * 100) + '%',
           maxTicksLimit: 6,
         },
       },
@@ -1403,7 +1409,8 @@ function LiveCapture({ onSaveCurve, onBack }) {
         ),
       },
     },
-  }), [hasGPSAnchoring]);
+   };
+  }, [hasGPSAnchoring, strokeRate]);
 
   // --- Render ---
 

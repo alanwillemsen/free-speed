@@ -116,7 +116,10 @@ function LiveBigScreen({ splitText, freeSpeed, strokeRate, chartData, hasGPSAnch
     };
   }, [chartData, c]);
 
-  const bigOptions = useMemo(() => ({
+  const bigOptions = useMemo(() => {
+   // Phase (0..1) × the average stroke period reads out as elapsed ms.
+   const periodMs = strokeRate > 0 ? 60000 / strokeRate : null;
+   return {
     responsive: true,
     maintainAspectRatio: false,
     animation: false,
@@ -124,7 +127,10 @@ function LiveBigScreen({ splitText, freeSpeed, strokeRate, chartData, hasGPSAnch
     scales: {
       x: {
         type: 'linear', min: 0, max: 1,
-        ticks: { display: false },
+        ticks: periodMs
+          ? { color: c.muted, font: { size: 16, weight: 'bold' }, maxTicksLimit: 5,
+              callback: (val) => Math.round(val * periodMs) }
+          : { display: false },
         grid: { color: c.grid },
         border: { color: c.grid },
       },
@@ -136,7 +142,8 @@ function LiveBigScreen({ splitText, freeSpeed, strokeRate, chartData, hasGPSAnch
         border: { color: c.grid },
       },
     },
-  }), [c, hasGPSAnchoring]);
+   };
+  }, [c, hasGPSAnchoring, strokeRate]);
 
   return (
     <div
