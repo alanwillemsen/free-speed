@@ -539,6 +539,24 @@ function LiveCapture({ onSaveCurve, onBack }) {
         }
 
         if (curve) {
+          // Stroke rate is a cadence measurement — track every detected stroke,
+          // independent of the GPS rowing gate below. Gating it on the speed
+          // band would average the rate across strokes the gate skipped (e.g.
+          // a pace sitting on the band edge, where the windowed split flickers
+          // in and out), diluting the rate well below the real cadence. Reset
+          // the window after a gap longer than a stroke so a genuine pause
+          // never gets averaged in as one slow stroke.
+          if (proc.boundaryTimes.length &&
+              now - proc.boundaryTimes[proc.boundaryTimes.length - 1] > MAX_STROKE_MS) {
+            proc.boundaryTimes = [];
+          }
+          proc.boundaryTimes.push(now);
+          if (proc.boundaryTimes.length > 10) proc.boundaryTimes.shift();
+          if (proc.boundaryTimes.length >= 2) {
+            const ct = proc.boundaryTimes;
+            proc.strokeRate = Math.round(60000 / ((ct[ct.length - 1] - ct[0]) / (ct.length - 1)));
+          }
+
           // Split comes from GPS (accurate absolute speed), not the IMU curve
           // mean (good for shape, drifty for magnitude). Smoothed over a window.
           const gpsSpeed = proc.hasGPS
@@ -561,13 +579,6 @@ function LiveCapture({ onSaveCurve, onBack }) {
             proc.lastStroke = curve;
             proc.lastGpsSpeed = gpsSpeed;
             proc.avgCurve = averageCurves(proc.strokes);
-
-            proc.boundaryTimes.push(now);
-            if (proc.boundaryTimes.length > 10) proc.boundaryTimes.shift();
-            if (proc.boundaryTimes.length >= 2) {
-              const ct = proc.boundaryTimes;
-              proc.strokeRate = Math.round(60000 / ((ct[ct.length - 1] - ct[0]) / (ct.length - 1)));
-            }
           }
         }
       }
