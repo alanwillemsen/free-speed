@@ -55,13 +55,13 @@ const REF_AVG = REF_SPEEDS.reduce((a, b) => a + b, 0) / REF_SPEEDS.length;
 // starts dropping hard into the catch — the rower's legs drive against the
 // footboard and the boat decelerates into its slowest point. The speed peak
 // feeding the catch is often a rounded plateau, so we don't start at the peak
-// itself; we find the "knee" just past it where the decline first becomes
-// steep, and roll the periodic curve to start there, putting that point at the
-// left edge (0.00 s). Mean and mean-cube are roll-invariant, so split and
-// free-speed are unaffected — this only sets where the x-axis begins.
+// itself; we find the point just past it where the decline first becomes steep,
+// and roll the periodic curve to start there, putting that point at the left
+// edge (0.00 s). Mean and mean-cube are roll-invariant, so split and free-speed
+// are unaffected — this only sets where the x-axis begins.
 const DECLINE_FRACTION = 0.4; // a step counts as "significant" at this share of the steepest step
 
-// Index where the big catch deceleration begins: the shoulder just before the
+// Index where the big catch deceleration begins: the last point before the
 // speed plunges into the slowest point. `curve` is periodic (last == first), so
 // m is the unique-sample count.
 function catchStartIndex(curve) {
