@@ -1277,13 +1277,15 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const comparisonCurve = individualStroke ? individualStroke.curve
     : (isCapturing || isWatching) ? lastStroke
     : displayAvgCurve;
-  // Shift the dashed potential vertically so its mean speed matches the stroke
-  // on screen — same effort baseline, so the read is shape-vs-shape regardless
-  // of pace. Additive shift preserves the reference's own amplitude.
-  const comparisonMean = comparisonCurve && comparisonCurve.length
-    ? comparisonCurve.reduce((a, b) => a + b, 0) / comparisonCurve.length
-    : null;
-  const potentialShift = comparisonMean != null ? comparisonMean - REF_AVG : 0;
+  // Scale the dashed potential to the stroke on screen the same way freeSpeedGain
+  // does — to equal power (mean-cube), not equal mean — so the line you see *is*
+  // the curve the free-speed number is measured against: your effort, the
+  // optimal shape, sitting above your mean by exactly the gain. Multiplicative
+  // scaling holds the reference's shape (relative variation) fixed at every pace.
+  const meanCube = (a) => a.reduce((s, v) => s + v * v * v, 0) / a.length;
+  const potentialScale = comparisonCurve && comparisonCurve.length && meanCube(comparisonCurve) > 0
+    ? Math.cbrt(meanCube(comparisonCurve) / meanCube(REF_SPEEDS))
+    : 1;
 
   // Roll captured curves so the chart begins where the catch deceleration kicks
   // in (see catchStartIndex). Driven by the stroke on screen so the average and
@@ -1292,9 +1294,9 @@ function LiveCapture({ onSaveCurve, onBack }) {
     ? catchStartIndex(comparisonCurve)
     : 0;
 
-  // Auto-scale the y-axis to whatever's plotted (shifted potential + the curves
+  // Auto-scale the y-axis to whatever's plotted (scaled potential + the curves
   // shown), padded, so each stroke fills the frame instead of a fixed scale.
-  const ys = REF_SPEEDS.map((s) => s + potentialShift);
+  const ys = REF_SPEEDS.map((s) => s * potentialScale);
   if (displayAvgCurve) ys.push(...displayAvgCurve);
   if (individualStroke) ys.push(...individualStroke.curve);
   else if (lastStroke && displayAvgCurve) ys.push(...lastStroke);
@@ -1306,7 +1308,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     const datasets = [
       {
         label: 'Your potential',
-        data: REF_ROLLED.map((s, i) => ({ x: PHASE_TIMES[i], y: s + potentialShift })),
+        data: REF_ROLLED.map((s, i) => ({ x: PHASE_TIMES[i], y: s * potentialScale })),
         borderColor: 'rgba(75, 192, 192, 1)',
         borderWidth: 3,
         borderDash: [5, 5],
@@ -1357,7 +1359,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     }
 
     return { datasets };
-  }, [displayAvgCurve, lastStroke, displayCount, individualStroke, selectedIndex, strokes.length, potentialShift, rollStart]);
+  }, [displayAvgCurve, lastStroke, displayCount, individualStroke, selectedIndex, strokes.length, potentialScale, rollStart]);
 
   // --- Stroke-time chart (one point per stroke, drag-to-select range) ---
 
