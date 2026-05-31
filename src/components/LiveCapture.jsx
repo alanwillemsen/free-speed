@@ -364,6 +364,10 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const [isActive, setIsActive] = useState(false);
   const [gpsStatus, setGpsStatus] = useState('idle'); // idle | requesting | active | unavailable
   const [hasGPSAnchoring, setHasGPSAnchoring] = useState(false);
+  // Distance (m) from integrating GPS speed: `piece` resets on demand (long-press
+  // in full screen) to mark a new piece; `session` is the whole capture.
+  const [pieceDistance, setPieceDistance] = useState(0);
+  const [sessionDistance, setSessionDistance] = useState(0);
   const [hasRecording, setHasRecording] = useState(false);
   const [isReplaying, setIsReplaying] = useState(false);
   // Snapshot of all strokes after stop/replay — enables time-range selection.
@@ -382,6 +386,10 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const dirRef = useRef({ x: 0, y: 1, z: 0 });
   const orientationRef = useRef({ beta: 0, gamma: 0 });
   const gpsRef = useRef({ speeds: [], watchId: null });
+  // Accumulated distance (m) from trapezoidal integration of GPS speed. `piece`
+  // is resettable; `session` runs the whole capture. last* hold the previous
+  // sample for the integration step.
+  const distanceRef = useRef({ piece: 0, session: 0, lastTime: null, lastSpeed: 0 });
   const recordingRef = useRef(null);
   const fileInputRef = useRef(null);
   const sendBufferRef = useRef({ motion: [], orientation: [], gps: [] });
@@ -393,6 +401,36 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const persistIntervalRef = useRef(null);
 
   const wakeLock = useWakeLock();
+
+  // Integrate one GPS speed sample (m/s at ms `time`) into the running piece and
+  // session distances by the trapezoidal rule. Skips backward/large gaps (tab
+  // reaps, replay jumps) so a stale speed isn't carried across them.
+  const accumulateDistance = (time, speed) => {
+    const d = distanceRef.current;
+    const v = Math.max(0, speed ?? 0);
+    if (d.lastTime != null) {
+      const dt = (time - d.lastTime) / 1000;
+      if (dt > 0 && dt < 5) {
+        const meters = (d.lastSpeed + v) / 2 * dt;
+        d.piece += meters;
+        d.session += meters;
+      }
+    }
+    d.lastTime = time;
+    d.lastSpeed = v;
+  };
+
+  const resetDistance = () => {
+    distanceRef.current = { piece: 0, session: 0, lastTime: null, lastSpeed: 0 };
+    setPieceDistance(0);
+    setSessionDistance(0);
+  };
+
+  // Mark a new piece — full-screen long-press. Keeps the session total.
+  const resetPiece = () => {
+    distanceRef.current.piece = 0;
+    setPieceDistance(0);
+  };
 
   // A previous capture that didn't end cleanly (crash / reload / tab reap),
   // offered for recovery on mount. null once handled.
@@ -696,6 +734,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     setStrokes([]);
     setSelection(null);
     setSelectedIndex(null);
+    resetDistance();
     isPausedRef.current = false;
     setIsPaused(false);
     setIsWatching(true);
@@ -791,6 +830,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
         if (Array.isArray(msg.samples)) {
           const rec = recordingRef.current;
           for (const s of msg.samples) {
+            accumulateDistance(s.t, s.speed);
             gpsRef.current.speeds.push({ time: s.t, speed: s.speed });
             if (rec) rec.gps.push(s);
           }
@@ -869,6 +909,8 @@ function LiveCapture({ onSaveCurve, onBack }) {
       setLiveSplitSpeed(proc.lastGpsSpeed ?? null);
       setAvgCurve(proc.avgCurve);
       setHasGPSAnchoring(proc.hasGPS);
+      setPieceDistance(distanceRef.current.piece);
+      setSessionDistance(distanceRef.current.session);
 
       // Boat rowing? Use the latest processed sample time (works for both the
       // rower's clock and a coach's stream of rower-stamped samples) so the
@@ -951,6 +993,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     setStrokes([]);
     setSelection(null);
     setSelectedIndex(null);
+    resetDistance();
     setIsCapturing(true);
 
     // Tell a connected coach a session is starting, then stream to it.
@@ -978,6 +1021,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
         (pos) => {
           if (pos.coords.speed != null && pos.coords.speed >= 0) {
             const gpsTime = performance.now() - (Date.now() - pos.timestamp);
+            accumulateDistance(gpsTime, pos.coords.speed);
             gpsRef.current.speeds.push({ time: gpsTime, speed: pos.coords.speed });
             // Keep last 30 seconds
             const cutoff = performance.now() - 30000;
@@ -1142,6 +1186,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     dirRef.current = { x: 0, y: 1, z: 0 };
     gpsRef.current.speeds = [];
     orientationRef.current = { beta: 0, gamma: 0 };
+    resetDistance();
 
     // Disable live recording so the replay doesn't double-record into the source data
     recordingRef.current = null;
@@ -1156,6 +1201,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
       if (ev.k === 'o') {
         if (ev.d.beta != null) orientationRef.current = { beta: ev.d.beta, gamma: ev.d.gamma };
       } else if (ev.k === 'g') {
+        accumulateDistance(ev.t, ev.d.speed);
         gpsRef.current.speeds.push({ time: ev.t, speed: ev.d.speed });
         const cutoff = ev.t - 30000;
         gpsRef.current.speeds = gpsRef.current.speeds.filter(s => s.time > cutoff);
@@ -1183,6 +1229,8 @@ function LiveCapture({ onSaveCurve, onBack }) {
     setStrokes([...proc.strokes]);
     setSelection(null);
     setSelectedIndex(null);
+    setPieceDistance(distanceRef.current.piece);
+    setSessionDistance(distanceRef.current.session);
     setHasRecording(true);
   };
 
@@ -1845,6 +1893,9 @@ function LiveCapture({ onSaveCurve, onBack }) {
           splitText={splitText}
           freeSpeedSeconds={freeSpeedSeconds}
           strokeRate={displayStrokeRate}
+          pieceDistance={pieceDistance}
+          sessionDistance={sessionDistance}
+          onResetPiece={resetPiece}
           chartData={chartData}
           hasGPSAnchoring={hasGPSAnchoring}
           onClose={() => setBigScreen(false)}

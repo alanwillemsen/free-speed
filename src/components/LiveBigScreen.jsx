@@ -23,7 +23,7 @@ const THEMES = {
   },
 };
 
-function LiveBigScreen({ splitText, freeSpeedSeconds, strokeRate, chartData, hasGPSAnchoring, onClose }) {
+function LiveBigScreen({ splitText, freeSpeedSeconds, strokeRate, pieceDistance, sessionDistance, onResetPiece, chartData, hasGPSAnchoring, onClose }) {
   const [theme, setTheme] = useState('sun');
   // Locked orientation while full-screen. Defaults to landscape (the wide
   // readout layout); the rotate button toggles it. The CSS layout follows the
@@ -31,6 +31,24 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, strokeRate, chartData, has
   const [orientation, setOrientation] = useState('landscape');
   const c = THEMES[theme];
   const rootRef = useRef(null);
+
+  // Long-press the piece distance to reset it (start a new piece). ~600 ms so a
+  // stray tap on the water doesn't zero it. Brief flash confirms the reset.
+  const holdTimerRef = useRef(null);
+  const [pieceFlash, setPieceFlash] = useState(false);
+  const beginPieceHold = () => {
+    cancelPieceHold();
+    holdTimerRef.current = setTimeout(() => {
+      holdTimerRef.current = null;
+      onResetPiece?.();
+      setPieceFlash(true);
+      setTimeout(() => setPieceFlash(false), 350);
+    }, 600);
+  };
+  const cancelPieceHold = () => {
+    if (holdTimerRef.current) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null; }
+  };
+  useEffect(() => cancelPieceHold, []);
 
   // Go true full-screen and lock to landscape where the platform allows it.
   // Android only honours an orientation lock *while* full-screen, so the lock
@@ -187,6 +205,25 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, strokeRate, chartData, has
         <div className="bigscreen-metric">
           <div className="bigscreen-value bigscreen-spm">{strokeRate || '—'}</div>
           <div className="bigscreen-label" style={{ color: c.muted }}>spm</div>
+          <div
+            className="bigscreen-distance"
+            onPointerDown={beginPieceHold}
+            onPointerUp={cancelPieceHold}
+            onPointerLeave={cancelPieceHold}
+            onPointerCancel={cancelPieceHold}
+            onContextMenu={(e) => e.preventDefault()}
+            style={{ cursor: 'pointer', userSelect: 'none', touchAction: 'none' }}
+            title="Hold to reset the piece"
+          >
+            <div className="bigscreen-distance-piece" style={{ color: pieceFlash ? c.good : c.fg }}>
+              {Math.round(pieceDistance || 0).toLocaleString()} m
+              {' '}
+              <span className="bigscreen-delta-cap" style={{ color: c.muted }}>piece · hold to reset</span>
+            </div>
+            <div className="bigscreen-distance-total" style={{ color: c.muted }}>
+              {Math.round(sessionDistance || 0).toLocaleString()} m total
+            </div>
+          </div>
         </div>
       </div>
 

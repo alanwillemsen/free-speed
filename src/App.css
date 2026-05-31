@@ -1430,6 +1430,24 @@ html.live-mode body {
   letter-spacing: 0.1em;
 }
 
+/* Distance under the SPM: the resettable piece, then the session total. */
+.bigscreen-distance {
+  margin-top: 1.4vh;
+  line-height: 1.05;
+}
+.bigscreen-distance-piece {
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: color 0.2s;
+}
+.bigscreen-distance-total {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  margin-top: 0.4vh;
+}
+
 /* The stroke speed profile fills whatever space the numbers don't take. */
 .bigscreen-graph {
   flex: 1 1 auto;
@@ -1455,6 +1473,8 @@ html.live-mode body {
   .bigscreen-spm { font-size: clamp(2.5rem, 13vh, 8rem); }
   .bigscreen-delta { font-size: clamp(1.4rem, 5.5vh, 3.5rem); }
   .bigscreen-delta-cap { font-size: clamp(0.6rem, 2vh, 1.1rem); }
+  .bigscreen-distance-piece { font-size: clamp(1.6rem, 6vh, 4rem); }
+  .bigscreen-distance-total { font-size: clamp(1.1rem, 3.6vh, 2.4rem); }
   .bigscreen-graph { padding: 4vh 3vw 4vh 1vw; }
 }
 
@@ -1480,6 +1500,8 @@ html.live-mode body {
   .bigscreen-spm { font-size: clamp(2.5rem, 14vw, 7rem); }
   .bigscreen-delta { font-size: clamp(1.3rem, 5vw, 3rem); }
   .bigscreen-delta-cap { font-size: clamp(0.55rem, 2vw, 1rem); }
+  .bigscreen-distance-piece { font-size: clamp(1.4rem, 5.5vw, 3.2rem); }
+  .bigscreen-distance-total { font-size: clamp(1rem, 4vw, 2rem); }
   .bigscreen-graph { width: 100%; padding: 1vh 3vw 4vh; }
 }
 
