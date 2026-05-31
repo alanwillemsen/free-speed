@@ -14,6 +14,7 @@ import LiveBigScreen from './LiveBigScreen';
 import { usePeerLink } from '../hooks/usePeerLink';
 import { useWakeLock } from '../hooks/useWakeLock';
 import * as sessionStore from '../utils/sessionStore';
+import { catchStartIndex, rollCurve } from '../utils/curves';
 import referenceCurveData from '../data/referenceCurve.json';
 
 ChartJS.register(LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler);
@@ -51,57 +52,12 @@ const PHASE_TIMES = Array.from({ length: NUM_POINTS }, (_, i) => i / (NUM_POINTS
 const REF_SPEEDS = referenceCurveData.speeds;
 const REF_AVG = REF_SPEEDS.reduce((a, b) => a + b, 0) / REF_SPEEDS.length;
 
-// Phase alignment. A stroke reads best when it begins where the boat's speed
-// starts dropping hard into the catch — the rower's legs drive against the
-// footboard and the boat decelerates into its slowest point. The speed peak
-// feeding the catch is often a rounded plateau, so we don't start at the peak
-// itself; we find the point just past it where the decline first becomes steep,
-// and roll the periodic curve to start there, putting that point at the left
-// edge (0.00 s). Mean and mean-cube are roll-invariant, so split and free-speed
-// are unaffected — this only sets where the x-axis begins.
-const DECLINE_FRACTION = 0.4; // a step counts as "significant" at this share of the steepest step
-
-// Index where the big catch deceleration begins: the last point before the
-// speed plunges into the slowest point. `curve` is periodic (last == first), so
-// m is the unique-sample count.
-function catchStartIndex(curve) {
-  const m = curve.length - 1;
-  // Slowest point — the catch.
-  let cmin = 0;
-  for (let i = 1; i < m; i++) if (curve[i] < curve[cmin]) cmin = i;
-  // Speed peak feeding the catch: walk back (circular) up the rise to its top.
-  let peak = cmin;
-  for (let step = 0; step < m - 1; step++) {
-    const prev = (peak - 1 + m) % m;
-    if (curve[prev] >= curve[peak]) peak = prev; else break;
-  }
-  const span = (cmin - peak + m) % m;
-  if (span === 0) return peak;
-  // Steepest single-step drop on the peak → catch descent.
-  let maxDrop = 0;
-  for (let i = 0; i < span; i++) {
-    const drop = curve[(peak + i) % m] - curve[(peak + i + 1) % m];
-    if (drop > maxDrop) maxDrop = drop;
-  }
-  // Start at the first step whose drop reaches a meaningful share of that — the
-  // end of the plateau, where slowing becomes significant.
-  const thresh = maxDrop * DECLINE_FRACTION;
-  for (let i = 0; i < span; i++) {
-    if (curve[(peak + i) % m] - curve[(peak + i + 1) % m] >= thresh) return (peak + i) % m;
-  }
-  return peak;
-}
-
-// Roll a periodic curve so it starts at `start`, keeping it periodic.
-function rollCurve(curve, start) {
-  const m = curve.length - 1;
-  const s = ((start % m) + m) % m;
-  const out = [];
-  for (let i = 0; i < m; i++) out.push(curve[(s + i) % m]);
-  out.push(out[0]);
-  return out;
-}
-
+// Phase alignment. A stroke reads best when it begins at the catch — where the
+// boat's speed drops hard into its slowest point as the legs drive against the
+// footboard. catchStartIndex / rollCurve (shared with the calculator chart in
+// utils/curves) roll the periodic curve to put that point at the left edge
+// (0.00 s). Roll-invariant for mean/mean-cube, so split and free-speed are
+// unaffected — it only sets where the x-axis begins.
 const REF_ROLLED = rollCurve(REF_SPEEDS, catchStartIndex(REF_SPEEDS));
 
 // --- Signal processing ---

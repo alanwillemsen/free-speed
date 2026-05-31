@@ -7,7 +7,6 @@ import LiveCapture from './components/LiveCapture';
 import OarCapture from './components/OarCapture';
 import Tradeoffs from './components/Tradeoffs';
 import { normalizeCurve } from './utils/curves';
-import { deriveSimpleLandmarks } from './utils/landmarks';
 import { calculateEnergy, calculateAveragePower, estimateFinishTime, calculateEnergyPenalty } from './utils/physics';
 import referenceCurveData from './data/referenceCurve.json';
 import './App.css';
@@ -40,10 +39,6 @@ function App() {
     times: referenceCurveData.times,
     speeds: referenceCurveData.speeds,
   });
-
-  const [landmarks] = useState(
-    deriveSimpleLandmarks(referenceCurveData.times, referenceCurveData.speeds)
-  );
 
   const sharedOnLoad = (() => {
     try { return parseShareHash(); } catch { return null; }
@@ -263,8 +258,6 @@ function App() {
             curveB={curveBNormalized}
             onCurveBChange={handleCurveBChange}
             onReset={handleReset}
-            landmarks={landmarks}
-            landmarksB={deriveSimpleLandmarks(curveBNormalized.times, curveBNormalized.speeds)}
             energyPenaltyPercent={penalty.percentPenalty}
             strokeRate={strokeRate}
             onStrokeRateChange={setStrokeRate}

@@ -2,6 +2,80 @@
  * Curve manipulation and normalization utilities
  */
 
+// --- Catch-relative phase alignment --------------------------------------
+// Boat-speed curves read best starting at the catch — where the boat's speed
+// drops hard into its slowest point as the legs drive against the footboard.
+// These helpers roll a periodic curve (last point == first) so that point is at
+// phase 0, and split the cycle into catch / drive / recovery. Rolling is
+// mean/mean-cube invariant, so it changes only where the x-axis begins, not any
+// energy, power, or finish-time figure.
+
+const DECLINE_FRACTION = 0.4; // a step counts as "significant" at this share of the steepest step
+
+// Index where the big catch deceleration begins: the last point before the
+// speed plunges into the slowest point. `curve` is periodic, so m = length - 1
+// is the unique-sample count.
+export function catchStartIndex(curve) {
+  const m = curve.length - 1;
+  let cmin = 0;
+  for (let i = 1; i < m; i++) if (curve[i] < curve[cmin]) cmin = i;
+  let peak = cmin;
+  for (let step = 0; step < m - 1; step++) {
+    const prev = (peak - 1 + m) % m;
+    if (curve[prev] >= curve[peak]) peak = prev; else break;
+  }
+  const span = (cmin - peak + m) % m;
+  if (span === 0) return peak;
+  let maxDrop = 0;
+  for (let i = 0; i < span; i++) {
+    const drop = curve[(peak + i) % m] - curve[(peak + i + 1) % m];
+    if (drop > maxDrop) maxDrop = drop;
+  }
+  const thresh = maxDrop * DECLINE_FRACTION;
+  for (let i = 0; i < span; i++) {
+    if (curve[(peak + i) % m] - curve[(peak + i + 1) % m] >= thresh) return (peak + i) % m;
+  }
+  return peak;
+}
+
+// Roll a periodic curve so it starts at `start`, keeping it periodic.
+export function rollCurve(curve, start) {
+  const m = curve.length - 1;
+  const s = ((start % m) + m) % m;
+  const out = [];
+  for (let i = 0; i < m; i++) out.push(curve[(s + i) % m]);
+  out.push(out[0]);
+  return out;
+}
+
+// Roll a curve so the catch (significant slowdown) sits at phase 0.
+export function rollToCatch(curve) {
+  return rollCurve(curve, catchStartIndex(curve));
+}
+
+// Phase boundaries (fractions of the cycle, 0..1) for a catch-aligned curve:
+//   catch:    0 .. catchEnd    — deceleration into the slowest point
+//   drive:    catchEnd .. driveEnd — legs drive, the boat accelerates
+//   recovery: driveEnd .. 1    — coast back toward the next catch
+// catchEnd is the first deceleration→acceleration turn (the slowest point);
+// driveEnd is the next such turn past it with above-average speed (the recovery
+// surge), falling back to the speed peak when the curve has no second up-swing.
+export function catchAlignedPhases(curve) {
+  const m = curve.length - 1;
+  const avg = curve.slice(0, m).reduce((a, b) => a + b, 0) / m;
+  const accel = (i) => curve[(i + 1) % m] - curve[(i - 1 + m) % m];
+  const ups = [];
+  for (let i = 0; i < m; i++) if (accel(i) < 0 && accel((i + 1) % m) >= 0) ups.push((i + 1) % m);
+  let cmin = 0, cmax = 0;
+  for (let i = 1; i < m; i++) {
+    if (curve[i] < curve[cmin]) cmin = i;
+    if (curve[i] > curve[cmax]) cmax = i;
+  }
+  const t1 = ups.length ? ups[0] : cmin;
+  const t2 = ups.find((u) => u > t1 && curve[u] > avg) ?? cmax;
+  return { catchEnd: t1 / m, driveEnd: t2 / m };
+}
+
 /**
  * Calculate average velocity from time and speed arrays
  */

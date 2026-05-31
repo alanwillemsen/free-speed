@@ -12,6 +12,7 @@ import {
 } from 'chart.js';
 import { Line } from 'react-chartjs-2';
 import annotationPlugin from 'chartjs-plugin-annotation';
+import { catchStartIndex, rollCurve, catchAlignedPhases } from '../utils/curves';
 
 ChartJS.register(
   CategoryScale,
@@ -25,7 +26,7 @@ ChartJS.register(
   annotationPlugin
 );
 
-function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landmarksB, energyPenaltyPercent, strokeRate, onStrokeRateChange, isNewCurve }) {
+function SpeedChart({ curveA, curveB, onCurveBChange, onReset, energyPenaltyPercent, strokeRate, onStrokeRateChange, isNewCurve }) {
   const chartRef = useRef(null);
   const [isDrawing, setIsDrawing] = useState(false);
 
@@ -37,95 +38,18 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
   const timesA_s = timesA.map(t => t * strokeDuration);
   const timesB_s = timesB.map(t => t * strokeDuration);
 
-  // Create annotations for landmarks (PEAK SPEED is computed but not shown)
-  const annotatedLandmarks = (landmarks || []).filter(l => l.label !== 'PEAK SPEED');
-  const annotatedLandmarksB = (landmarksB || []).filter(l => l.label !== 'PEAK SPEED');
-  const landmarkAnnotations = {};
-  if (annotatedLandmarks.length > 0) {
-    annotatedLandmarks.forEach((landmark, idx) => {
-      landmarkAnnotations[`landmark_${idx}`] = {
-        type: 'line',
-        xMin: landmark.time * strokeDuration,
-        xMax: landmark.time * strokeDuration,
-        borderColor: 'rgba(100, 100, 100, 0.6)',
-        borderWidth: 1,
-        borderDash: [3, 3],
-        label: {
-          display: true,
-          content: landmark.label,
-          position: 'start',
-          backgroundColor: 'rgba(75, 192, 192, 0.85)',
-          color: 'white',
-          font: {
-            size: 9,
-            weight: 'normal'
-          },
-          padding: 3,
-          rotation: 0
-        }
-      };
-    });
-  }
-
-  // Rower B landmark annotations
-  if (annotatedLandmarksB.length > 0) {
-    annotatedLandmarksB.forEach((landmark, idx) => {
-      landmarkAnnotations[`landmarkB_${idx}`] = {
-        type: 'line',
-        xMin: landmark.time * strokeDuration,
-        xMax: landmark.time * strokeDuration,
-        borderColor: 'rgba(255, 99, 132, 0.7)',
-        borderWidth: 1,
-        borderDash: [3, 3],
-        label: {
-          display: true,
-          content: landmark.label,
-          position: 'end',
-          backgroundColor: 'rgba(255, 99, 132, 0.85)',
-          color: 'white',
-          font: {
-            size: 9,
-            weight: 'normal'
-          },
-          padding: 3,
-          rotation: 0
-        }
-      };
-    });
-  }
-
-  // Phase duration labels for each rower
-  const findLm = (lms, label) => lms?.find(l => l.label === label);
-
-  const addPhaseLabels = (lms, prefix, yRow, bgColor) => {
-    const entry      = findLm(lms, 'ENTRY');
-    const extraction = findLm(lms, 'EXTRACTION');
-    const bodiesOver = findLm(lms, 'BODIES OVER');
-
-    const phases = [
-      { key: 'catch',    name: 'Catch',    start: 0,                end: entry?.time      },
-      { key: 'drive',    name: 'Drive',    start: entry?.time,      end: extraction?.time },
-      { key: 'hang',     name: 'Hang',     start: extraction?.time, end: bodiesOver?.time },
-      { key: 'recovery', name: 'Recovery', start: extraction?.time, end: 1.0              },
-    ];
-
-    phases.forEach(({ key, name, start, end }) => {
-      if (start == null || end == null || end <= start) return;
-      const startS = start * strokeDuration;
-      const endS = end * strokeDuration;
-      landmarkAnnotations[`${prefix}_phase_${key}`] = {
-        type: 'label',
-        xValue: (startS + endS) / 2,
-        yValue: yRow,
-        content: [`${name}: ${(endS - startS).toFixed(2)}s`],
-        backgroundColor: bgColor,
-        color: 'white',
-        font: { size: 9 },
-        padding: { x: 5, y: 2 },
-        textAlign: 'center',
-      };
-    });
-  };
+  // Roll both curves so each begins at its catch — where the boat starts slowing
+  // hard into its slowest point — matching the live-capture profile. Display
+  // only: the stored curves and every physics figure (roll-invariant) are
+  // unchanged. The draw handler maps clicks back through offsetB.
+  // While drawing, freeze offsetB (captured at drag start) so editing a point
+  // can't move the detected catch and shift the whole curve mid-drag; it
+  // re-aligns on release.
+  const dragOffsetRef = useRef(0);
+  const offsetA = catchStartIndex(speedsA);
+  const offsetB = isDrawing ? dragOffsetRef.current : catchStartIndex(speedsB);
+  const rolledA = rollCurve(speedsA, offsetA);
+  const rolledB = rollCurve(speedsB, offsetB);
 
   // Compute Y-axis bounds from actual data with padding
   const allSpeeds = [...speedsA, ...speedsB];
@@ -135,28 +59,62 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
   const yMin = Math.floor((dataMin - padding) * 2) / 2; // round down to nearest 0.5
   const yMax = Math.ceil((dataMax + padding) * 2) / 2;  // round up to nearest 0.5
 
-  // Position phase labels near the bottom and top of the chart
-  const labelYA = yMin + (yMax - yMin) * 0.08;
-  const labelYB = yMax - (yMax - yMin) * 0.08;
+  // Average speed line (same for both curves after normalization).
+  const avgSpeed = speedsB.reduce((a, b) => a + b, 0) / speedsB.length;
 
-  addPhaseLabels(landmarks,  'A', labelYA, 'rgba(75, 192, 192, 0.85)');
-  addPhaseLabels(landmarksB, 'B', labelYB, 'rgba(255, 99, 132, 0.85)');
-
-  // Average speed horizontal line (same for both curves after normalization)
-  const avgSpeed = speedsA.reduce((a, b) => a + b, 0) / speedsA.length;
-
-  landmarkAnnotations['avgSpeed'] = {
-    type: 'line',
-    yMin: avgSpeed,
-    yMax: avgSpeed,
-    borderColor: 'rgba(100, 100, 100, 0.4)',
-    borderWidth: 1.5,
-    borderDash: [8, 4],
+  const landmarkAnnotations = {
+    avgSpeed: {
+      type: 'line',
+      yMin: avgSpeed,
+      yMax: avgSpeed,
+      borderColor: 'rgba(100, 100, 100, 0.4)',
+      borderWidth: 1.5,
+      borderDash: [8, 4],
+    },
   };
 
+  // Catch / drive / recovery of the "You now" curve, shown as labelled bands
+  // split by the two phase boundaries (see catchAlignedPhases):
+  //   catch    — 0 until deceleration turns to acceleration (the slowest point)
+  //   drive    — until acceleration picks up again above average speed
+  //   recovery — to the end of the stroke
+  const phases = catchAlignedPhases(rolledB);
+  const segments = [
+    { name: 'Catch',    start: 0,               end: phases.catchEnd },
+    { name: 'Drive',    start: phases.catchEnd, end: phases.driveEnd },
+    { name: 'Recovery', start: phases.driveEnd, end: 1 },
+  ];
+  const labelY = yMax - (yMax - yMin) * 0.08;
+  [phases.catchEnd, phases.driveEnd].forEach((b, idx) => {
+    landmarkAnnotations[`phaseDiv_${idx}`] = {
+      type: 'line',
+      xMin: b * strokeDuration,
+      xMax: b * strokeDuration,
+      borderColor: 'rgba(255, 99, 132, 0.5)',
+      borderWidth: 1,
+      borderDash: [4, 4],
+    };
+  });
+  segments.forEach((seg, idx) => {
+    if (seg.end <= seg.start) return;
+    const startS = seg.start * strokeDuration;
+    const endS = seg.end * strokeDuration;
+    landmarkAnnotations[`phaseLbl_${idx}`] = {
+      type: 'label',
+      xValue: (startS + endS) / 2,
+      yValue: labelY,
+      content: [seg.name, `${(endS - startS).toFixed(2)}s`],
+      backgroundColor: 'rgba(255, 99, 132, 0.85)',
+      color: 'white',
+      font: { size: 10 },
+      padding: { x: 5, y: 2 },
+      textAlign: 'center',
+    };
+  });
+
   // Create data arrays with x,y coordinates using time in seconds
-  const dataA = speedsA.map((speed, i) => ({ x: timesA_s[i], y: speed }));
-  const dataB = speedsB.map((speed, i) => ({ x: timesB_s[i], y: speed }));
+  const dataA = rolledA.map((speed, i) => ({ x: timesA_s[i], y: speed }));
+  const dataB = rolledB.map((speed, i) => ({ x: timesB_s[i], y: speed }));
 
   const data = {
     datasets: [
@@ -280,18 +238,22 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
     const xValue = xScale.getValueForPixel(x);
     const yValue = yScale.getValueForPixel(y);
 
-    // Find the closest index in timesB_s (times in seconds)
-    const closestIndex = timesB_s.reduce((best, t, i) =>
+    // Find the closest point on the displayed (rolled) curve, then map it back
+    // to the stored index via offsetB so the edit lands on the right point.
+    const displayIndex = timesB_s.reduce((best, t, i) =>
       Math.abs(t - xValue) < Math.abs(timesB_s[best] - xValue) ? i : best, 0);
 
-    if (closestIndex >= 0 && closestIndex < speedsB.length && yValue > 0 && yValue < 10) {
+    if (displayIndex >= 0 && displayIndex < speedsB.length && yValue > 0 && yValue < 10) {
+      const m = speedsB.length - 1;
+      const storedIndex = (offsetB + displayIndex) % m;
       const newSpeeds = [...speedsB];
-      newSpeeds[closestIndex] = yValue;
+      newSpeeds[storedIndex] = yValue;
       onCurveBChange(newSpeeds);
     }
   };
 
   const handleMouseDown = (event) => {
+    dragOffsetRef.current = catchStartIndex(speedsB); // freeze alignment for the drag
     setIsDrawing(true);
     updateCurveFromMouse(event);
   };
@@ -326,7 +288,7 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, landmarks, landma
       canvas.removeEventListener('mouseup', onUp);
       canvas.removeEventListener('mouseleave', onUp);
     };
-  }, [isDrawing, speedsB, timesB, strokeRate]);
+  }, [isDrawing, speedsB, timesB, strokeRate, offsetB]);
 
   return (
     <div className="chart-container">
