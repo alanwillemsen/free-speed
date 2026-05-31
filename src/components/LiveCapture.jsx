@@ -1219,11 +1219,34 @@ function LiveCapture({ onSaveCurve, onBack }) {
     displayStrokeRate = strokeRate;
   }
 
+  // The stroke being compared against potential: the inspected one, else the
+  // live latest stroke, else the reviewed average.
+  const comparisonCurve = individualStroke ? individualStroke.curve
+    : (isCapturing || isWatching) ? lastStroke
+    : displayAvgCurve;
+  // Shift the dashed potential vertically so its mean speed matches the stroke
+  // on screen — same effort baseline, so the read is shape-vs-shape regardless
+  // of pace. Additive shift preserves the reference's own amplitude.
+  const comparisonMean = comparisonCurve && comparisonCurve.length
+    ? comparisonCurve.reduce((a, b) => a + b, 0) / comparisonCurve.length
+    : null;
+  const potentialShift = comparisonMean != null ? comparisonMean - REF_AVG : 0;
+
+  // Auto-scale the y-axis to whatever's plotted (shifted potential + the curves
+  // shown), padded, so each stroke fills the frame instead of a fixed scale.
+  const ys = REF_SPEEDS.map((s) => s + potentialShift);
+  if (displayAvgCurve) ys.push(...displayAvgCurve);
+  if (individualStroke) ys.push(...individualStroke.curve);
+  else if (lastStroke && displayAvgCurve) ys.push(...lastStroke);
+  const yLo = Math.min(...ys), yHi = Math.max(...ys);
+  const yPad = Math.max((yHi - yLo) * 0.1, 0.2);
+  const yMin = yLo - yPad, yMax = yHi + yPad;
+
   const chartData = useMemo(() => {
     const datasets = [
       {
         label: 'Your potential',
-        data: REF_SPEEDS.map((s, i) => ({ x: PHASE_TIMES[i], y: s })),
+        data: REF_SPEEDS.map((s, i) => ({ x: PHASE_TIMES[i], y: s + potentialShift })),
         borderColor: 'rgba(75, 192, 192, 1)',
         borderWidth: 3,
         borderDash: [5, 5],
@@ -1274,7 +1297,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     }
 
     return { datasets };
-  }, [displayAvgCurve, lastStroke, displayCount, individualStroke, selectedIndex, strokes.length]);
+  }, [displayAvgCurve, lastStroke, displayCount, individualStroke, selectedIndex, strokes.length, potentialShift]);
 
   // --- Stroke-time chart (one point per stroke, drag-to-select range) ---
 
@@ -1431,14 +1454,18 @@ function LiveCapture({ onSaveCurve, onBack }) {
         },
       },
       y: {
-        ...(hasGPSAnchoring
-          ? { title: { display: true, text: 'Boat Speed (m/s)', font: { size: 12 } } }
-          : { min: 2, max: 8, title: { display: true, text: 'Boat Speed (relative)', font: { size: 12 } } }
-        ),
+        // Auto-scaled per stroke (see yMin/yMax) so the curve fills the frame.
+        min: yMin,
+        max: yMax,
+        title: {
+          display: true,
+          text: hasGPSAnchoring ? 'Boat Speed (m/s)' : 'Boat Speed (relative)',
+          font: { size: 12 },
+        },
       },
     },
    };
-  }, [hasGPSAnchoring, displayStrokeRate]);
+  }, [hasGPSAnchoring, displayStrokeRate, yMin, yMax]);
 
   // --- Render ---
 
@@ -1545,13 +1572,10 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const splitText = hasGPSAnchoring && displaySplitSpeed > 0 ? formatSplit(500 / displaySplitSpeed) : '—';
 
   // Speed (m/s) available by matching the potential curve's shape at your
-  // current effort — see freeSpeedGain. Uses the latest stroke while live so it
-  // updates every stroke (the inspected stroke when reviewing one, else the
-  // selected average). Only meaningful when GPS-anchored.
-  const freeSpeedSource = individualStroke ? individualStroke.curve
-    : isLive ? lastStroke
-    : displayAvgCurve;
-  const freeSpeed = hasGPSAnchoring ? freeSpeedGain(freeSpeedSource, REF_SPEEDS) : null;
+  // current effort — see freeSpeedGain. Uses the same stroke the chart compares
+  // against potential (latest while live, the inspected one, else the average).
+  // Only meaningful when GPS-anchored.
+  const freeSpeed = hasGPSAnchoring ? freeSpeedGain(comparisonCurve, REF_SPEEDS) : null;
 
   const statsView = (
     <div className="live-stats">
