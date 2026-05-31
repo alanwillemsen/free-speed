@@ -573,7 +573,10 @@ function LiveCapture({ onSaveCurve, onBack }) {
             : nowOverride != null;
           if (rowing) {
             const avgSpeed = curve.reduce((a, b) => a + b, 0) / curve.length;
-            proc.strokes.push({ time: now, curve, avgSpeed, gpsSpeed });
+            // Stamp the cadence at this stroke so a later inspection of one
+            // stroke (or a range) reads out the rate there, not the session-end
+            // scalar. proc.strokeRate was just refreshed above.
+            proc.strokes.push({ time: now, curve, avgSpeed, gpsSpeed, spm: proc.strokeRate });
             if (proc.strokes.length > MAX_STROKES) proc.strokes.shift();
             proc.strokeCount++;
             proc.lastStroke = curve;
@@ -1176,9 +1179,9 @@ function LiveCapture({ onSaveCurve, onBack }) {
     }
     onSaveCurve({
       name: `Live Capture ${new Date().toLocaleString()}`,
-      desc: `${displayCount} strokes at ${strokeRate} spm${hasGPSAnchoring ? ' (GPS)' : ''}`,
+      desc: `${displayCount} strokes at ${displayStrokeRate} spm${hasGPSAnchoring ? ' (GPS)' : ''}`,
       speeds: scaledSpeeds,
-      strokeRate: strokeRate || 36,
+      strokeRate: displayStrokeRate || 36,
       raceTime,
     });
   };
@@ -1201,6 +1204,20 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const displayCount = selectedStrokes ? selectedStrokes.length : strokeCount;
 
   const individualStroke = (selectedIndex != null && strokes[selectedIndex]) || null;
+
+  // Stroke-rate readout, mirroring the split: inspecting a stroke → its cadence
+  // there; reviewing a range (or the whole session) → the mean cadence; live →
+  // the running rate. Per-stroke `spm` is stamped at capture time.
+  const strokeRateOf = (s) => (s && s.spm > 0 ? s.spm : null);
+  let displayStrokeRate;
+  if (individualStroke) {
+    displayStrokeRate = strokeRateOf(individualStroke);
+  } else if (selectedStrokes && selectedStrokes.length > 0) {
+    const vals = selectedStrokes.map(strokeRateOf).filter((v) => v != null);
+    displayStrokeRate = vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : null;
+  } else {
+    displayStrokeRate = strokeRate;
+  }
 
   const chartData = useMemo(() => {
     const datasets = [
@@ -1372,7 +1389,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const chartOptions = useMemo(() => {
    // Curves are stored phase-normalized (0..1) since strokes vary in length; the
    // stroke rate gives the average period, so phase × period reads out as ms.
-   const periodMs = strokeRate > 0 ? 60000 / strokeRate : null;
+   const periodMs = displayStrokeRate > 0 ? 60000 / displayStrokeRate : null;
    return {
     responsive: true,
     maintainAspectRatio: false,
@@ -1421,7 +1438,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
       },
     },
    };
-  }, [hasGPSAnchoring, strokeRate]);
+  }, [hasGPSAnchoring, displayStrokeRate]);
 
   // --- Render ---
 
@@ -1539,7 +1556,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const statsView = (
     <div className="live-stats">
       <div className="live-stat">
-        <span className="live-stat-value">{strokeRate || '—'}</span>
+        <span className="live-stat-value">{displayStrokeRate || '—'}</span>
         <span className="live-stat-label">spm</span>
       </div>
       <div className="live-stat">
@@ -1731,7 +1748,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
         <LiveBigScreen
           splitText={splitText}
           freeSpeed={freeSpeed}
-          strokeRate={strokeRate}
+          strokeRate={displayStrokeRate}
           chartData={chartData}
           hasGPSAnchoring={hasGPSAnchoring}
           onClose={() => setBigScreen(false)}
