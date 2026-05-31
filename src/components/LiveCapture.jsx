@@ -51,14 +51,15 @@ const PHASE_TIMES = Array.from({ length: NUM_POINTS }, (_, i) => i / (NUM_POINTS
 const REF_SPEEDS = referenceCurveData.speeds;
 const REF_AVG = REF_SPEEDS.reduce((a, b) => a + b, 0) / REF_SPEEDS.length;
 
-// Phase alignment. A stroke is most readable when the curve begins just before
-// the catch deceleration — the rower drives the legs against the footboard and
-// the boat decelerates hard into its slowest point. We find where boat speed
-// peaks just before that steepest decline (the rise feeding the slowest point)
-// and roll the periodic curve to start a hair earlier. Mean and mean-cube are
-// roll-invariant, so split and free-speed are unaffected — this only sets where
-// the x-axis begins.
-const PHASE_LEAD = 2; // points of lead-in (~6%) shown before the decline begins
+// Phase alignment. A stroke is most readable when the curve begins at the catch
+// — the rower drives the legs against the footboard and the boat decelerates
+// hard into its slowest point. We find where boat speed peaks right before that
+// steepest decline (the rise feeding the slowest point) and roll the periodic
+// curve to start exactly there, so the catch is the left edge (0.00 s) and the
+// big deceleration follows immediately. Mean and mean-cube are roll-invariant,
+// so split and free-speed are unaffected — this only sets where the x-axis
+// begins.
+const PHASE_LEAD = 0; // points of lead-in shown before the catch (0 = catch at the left edge)
 
 // Index of the speed peak that immediately precedes the catch (the curve's
 // slowest point) — i.e. where the big deceleration begins. `curve` is periodic
