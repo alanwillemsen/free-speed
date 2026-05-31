@@ -23,7 +23,7 @@ const THEMES = {
   },
 };
 
-function LiveBigScreen({ splitText, freeSpeed, strokeRate, chartData, hasGPSAnchoring, onClose }) {
+function LiveBigScreen({ splitText, freeSpeedSeconds, strokeRate, chartData, hasGPSAnchoring, onClose }) {
   const [theme, setTheme] = useState('sun');
   // Locked orientation while full-screen. Defaults to landscape (the wide
   // readout layout); the rotate button toggles it. The CSS layout follows the
@@ -176,11 +176,11 @@ function LiveBigScreen({ splitText, freeSpeed, strokeRate, chartData, hasGPSAnch
         <div className="bigscreen-metric">
           <div className="bigscreen-value bigscreen-split" style={{ color: c.accent }}>{splitText}</div>
           <div className="bigscreen-label" style={{ color: c.muted }}>/500m</div>
-          {freeSpeed != null && (
-            <div className="bigscreen-delta" style={{ color: freeSpeed > 0.005 ? c.warn : c.good }}>
-              {(freeSpeed >= 0 ? '+' : '−') + Math.abs(freeSpeed).toFixed(2) + ' m/s'}
+          {freeSpeedSeconds != null && (
+            <div className="bigscreen-delta" style={{ color: freeSpeedSeconds > 0.5 ? c.warn : c.good }}>
+              {(freeSpeedSeconds >= 0 ? '+' : '−') + Math.abs(freeSpeedSeconds).toFixed(1) + ' s'}
               {' '}
-              <span className="bigscreen-delta-cap" style={{ color: c.muted }}>free speed</span>
+              <span className="bigscreen-delta-cap" style={{ color: c.muted }}>free speed / 2k</span>
             </div>
           )}
         </div>

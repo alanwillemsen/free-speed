@@ -1638,6 +1638,16 @@ function LiveCapture({ onSaveCurve, onBack }) {
   // against potential (latest while live, the inspected one, else the average).
   // Only meaningful when GPS-anchored.
   const freeSpeed = hasGPSAnchoring ? freeSpeedGain(comparisonCurve, REF_SPEEDS) : null;
+  // The same gain expressed as time over 2 000 m: row 2k at your average speed
+  // vs. at the potential's (higher) average speed for the same effort. Positive
+  // = seconds you'd save by matching the optimal shape. Reads better on the
+  // water than m/s.
+  let freeSpeedSeconds = null;
+  if (freeSpeed != null && comparisonCurve && comparisonCurve.length) {
+    const vYou = comparisonCurve.reduce((a, b) => a + b, 0) / comparisonCurve.length;
+    const vPot = vYou + freeSpeed;
+    if (vYou > 0 && vPot > 0) freeSpeedSeconds = 2000 / vYou - 2000 / vPot;
+  }
 
   const statsView = (
     <div className="live-stats">
@@ -1833,7 +1843,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
       {bigScreen && (
         <LiveBigScreen
           splitText={splitText}
-          freeSpeed={freeSpeed}
+          freeSpeedSeconds={freeSpeedSeconds}
           strokeRate={displayStrokeRate}
           chartData={chartData}
           hasGPSAnchoring={hasGPSAnchoring}
