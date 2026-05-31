@@ -51,29 +51,45 @@ const PHASE_TIMES = Array.from({ length: NUM_POINTS }, (_, i) => i / (NUM_POINTS
 const REF_SPEEDS = referenceCurveData.speeds;
 const REF_AVG = REF_SPEEDS.reduce((a, b) => a + b, 0) / REF_SPEEDS.length;
 
-// Phase alignment. A stroke is most readable when the curve begins at the catch
-// — the rower drives the legs against the footboard and the boat decelerates
-// hard into its slowest point. We find where boat speed peaks right before that
-// steepest decline (the rise feeding the slowest point) and roll the periodic
-// curve to start exactly there, so the catch is the left edge (0.00 s) and the
-// big deceleration follows immediately. Mean and mean-cube are roll-invariant,
-// so split and free-speed are unaffected — this only sets where the x-axis
-// begins.
-const PHASE_LEAD = 0; // points of lead-in shown before the catch (0 = catch at the left edge)
+// Phase alignment. A stroke reads best when it begins where the boat's speed
+// starts dropping hard into the catch — the rower's legs drive against the
+// footboard and the boat decelerates into its slowest point. The speed peak
+// feeding the catch is often a rounded plateau, so we don't start at the peak
+// itself; we find the "knee" just past it where the decline first becomes
+// steep, and roll the periodic curve to start there, putting that point at the
+// left edge (0.00 s). Mean and mean-cube are roll-invariant, so split and
+// free-speed are unaffected — this only sets where the x-axis begins.
+const DECLINE_FRACTION = 0.4; // a step counts as "significant" at this share of the steepest step
 
-// Index of the speed peak that immediately precedes the catch (the curve's
-// slowest point) — i.e. where the big deceleration begins. `curve` is periodic
-// (last point == first), so m is the unique-sample count.
-function declineStartIndex(curve) {
+// Index where the big catch deceleration begins: the shoulder just before the
+// speed plunges into the slowest point. `curve` is periodic (last == first), so
+// m is the unique-sample count.
+function catchStartIndex(curve) {
   const m = curve.length - 1;
+  // Slowest point — the catch.
   let cmin = 0;
   for (let i = 1; i < m; i++) if (curve[i] < curve[cmin]) cmin = i;
-  let k = cmin;
+  // Speed peak feeding the catch: walk back (circular) up the rise to its top.
+  let peak = cmin;
   for (let step = 0; step < m - 1; step++) {
-    const prev = (k - 1 + m) % m;
-    if (curve[prev] >= curve[k]) k = prev; else break; // walk up the rise to its peak
+    const prev = (peak - 1 + m) % m;
+    if (curve[prev] >= curve[peak]) peak = prev; else break;
   }
-  return k;
+  const span = (cmin - peak + m) % m;
+  if (span === 0) return peak;
+  // Steepest single-step drop on the peak → catch descent.
+  let maxDrop = 0;
+  for (let i = 0; i < span; i++) {
+    const drop = curve[(peak + i) % m] - curve[(peak + i + 1) % m];
+    if (drop > maxDrop) maxDrop = drop;
+  }
+  // Start at the first step whose drop reaches a meaningful share of that — the
+  // end of the plateau, where slowing becomes significant.
+  const thresh = maxDrop * DECLINE_FRACTION;
+  for (let i = 0; i < span; i++) {
+    if (curve[(peak + i) % m] - curve[(peak + i + 1) % m] >= thresh) return (peak + i) % m;
+  }
+  return peak;
 }
 
 // Roll a periodic curve so it starts at `start`, keeping it periodic.
@@ -86,7 +102,7 @@ function rollCurve(curve, start) {
   return out;
 }
 
-const REF_ROLLED = rollCurve(REF_SPEEDS, declineStartIndex(REF_SPEEDS) - PHASE_LEAD);
+const REF_ROLLED = rollCurve(REF_SPEEDS, catchStartIndex(REF_SPEEDS));
 
 // --- Signal processing ---
 
@@ -1269,11 +1285,11 @@ function LiveCapture({ onSaveCurve, onBack }) {
     : null;
   const potentialShift = comparisonMean != null ? comparisonMean - REF_AVG : 0;
 
-  // Roll captured curves so the chart begins just before the catch deceleration
-  // (see PHASE_LEAD). Driven by the stroke on screen so the average and the
-  // inspected/last stroke stay mutually aligned; the reference uses its own.
+  // Roll captured curves so the chart begins where the catch deceleration kicks
+  // in (see catchStartIndex). Driven by the stroke on screen so the average and
+  // the inspected/last stroke stay mutually aligned; the reference uses its own.
   const rollStart = comparisonCurve && comparisonCurve.length
-    ? declineStartIndex(comparisonCurve) - PHASE_LEAD
+    ? catchStartIndex(comparisonCurve)
     : 0;
 
   // Auto-scale the y-axis to whatever's plotted (shifted potential + the curves
