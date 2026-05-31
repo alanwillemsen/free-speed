@@ -71,24 +71,50 @@ function LiveBigScreen({ splitText, freeSpeed, strokeRate, chartData, hasGPSAnch
   }, [onClose]);
 
   // Recolour and thicken the shared chart datasets for distance reading.
-  const bigData = useMemo(() => ({
-    datasets: (chartData.datasets || []).map((ds) => {
-      const label = ds.label || '';
-      const isPotential = /potential/i.test(label);
-      const isLast = /last/i.test(label);
-      const own = !isPotential && !isLast; // the rower's average / inspected stroke
-      return {
-        ...ds,
-        borderColor: isPotential ? c.potential : isLast ? c.last : c.accent,
-        backgroundColor: 'transparent',
-        borderWidth: own ? 6 : isPotential ? 3 : 2.5,
-        borderDash: isPotential ? [8, 8] : [],
-        pointRadius: 0,
-        fill: false,
-        tension: 0.4,
-      };
-    }),
-  }), [chartData, c]);
+  // The outdoor readout drops the running average — at arm's length the latest
+  // stroke (and the potential it's chasing) is what matters — and phase-shifts
+  // every curve so the cycle starts and ends at the peak speed instead of at
+  // full reach, framing the drive in the middle of the graph.
+  const bigData = useMemo(() => {
+    const datasets = (chartData.datasets || []).filter(
+      (ds) => !/average/i.test(ds.label || '')
+    );
+    // Peak of the rower's own line (latest / inspected stroke) sets the shift;
+    // fall back to the first remaining line so something still anchors it.
+    const ownDs = datasets.find((ds) => !/potential/i.test(ds.label || '')) || datasets[0];
+    let shift = 0;
+    if (ownDs?.data?.length > 1) {
+      const period = ownDs.data.length - 1; // curves are periodic: point 0 == last
+      let peakY = -Infinity;
+      for (let i = 0; i < period; i++) {
+        const y = ownDs.data[i].y;
+        if (y != null && y > peakY) { peakY = y; shift = i; }
+      }
+    }
+    // Re-index y so position 0 lands on the peak; x stays an even 0..1 sweep.
+    // The endpoint wraps back to the peak (period modulo), keeping it periodic.
+    const rotate = (data) => {
+      if (!shift || !data || data.length < 2) return data;
+      const period = data.length - 1;
+      return data.map((pt, i) => ({ x: pt.x, y: data[(shift + i) % period].y }));
+    };
+    return {
+      datasets: datasets.map((ds) => {
+        const isPotential = /potential/i.test(ds.label || '');
+        return {
+          ...ds,
+          data: rotate(ds.data),
+          borderColor: isPotential ? c.potential : c.accent,
+          backgroundColor: 'transparent',
+          borderWidth: isPotential ? 3 : 6,
+          borderDash: isPotential ? [8, 8] : [],
+          pointRadius: 0,
+          fill: false,
+          tension: 0.4,
+        };
+      }),
+    };
+  }, [chartData, c]);
 
   const bigOptions = useMemo(() => ({
     responsive: true,
@@ -104,7 +130,8 @@ function LiveBigScreen({ splitText, freeSpeed, strokeRate, chartData, hasGPSAnch
       },
       y: {
         ...(hasGPSAnchoring ? {} : { min: 2, max: 8 }),
-        ticks: { color: c.muted, font: { size: 18, weight: 'bold' }, maxTicksLimit: 5 },
+        // Units add nothing at arm's length — the curve shape is the message.
+        ticks: { display: false },
         grid: { color: c.grid },
         border: { color: c.grid },
       },
