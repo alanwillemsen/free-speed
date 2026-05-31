@@ -1394,10 +1394,10 @@ function LiveCapture({ onSaveCurve, onBack }) {
         type: 'linear',
         min: 0,
         max: 1,
-        title: { display: true, text: periodMs ? 'Time (ms)' : 'Stroke Phase', font: { size: 12 } },
+        title: { display: true, text: periodMs ? 'Time (s)' : 'Stroke Phase', font: { size: 12 } },
         ticks: {
           callback: periodMs
-            ? (val) => Math.round(val * periodMs)
+            ? (val) => (val * periodMs / 1000).toFixed(2)
             : (val) => Math.round(val * 100) + '%',
           maxTicksLimit: 6,
         },
