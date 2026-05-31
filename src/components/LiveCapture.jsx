@@ -51,6 +51,42 @@ const PHASE_TIMES = Array.from({ length: NUM_POINTS }, (_, i) => i / (NUM_POINTS
 const REF_SPEEDS = referenceCurveData.speeds;
 const REF_AVG = REF_SPEEDS.reduce((a, b) => a + b, 0) / REF_SPEEDS.length;
 
+// Phase alignment. A stroke is most readable when the curve begins just before
+// the catch deceleration — the rower drives the legs against the footboard and
+// the boat decelerates hard into its slowest point. We find where boat speed
+// peaks just before that steepest decline (the rise feeding the slowest point)
+// and roll the periodic curve to start a hair earlier. Mean and mean-cube are
+// roll-invariant, so split and free-speed are unaffected — this only sets where
+// the x-axis begins.
+const PHASE_LEAD = 2; // points of lead-in (~6%) shown before the decline begins
+
+// Index of the speed peak that immediately precedes the catch (the curve's
+// slowest point) — i.e. where the big deceleration begins. `curve` is periodic
+// (last point == first), so m is the unique-sample count.
+function declineStartIndex(curve) {
+  const m = curve.length - 1;
+  let cmin = 0;
+  for (let i = 1; i < m; i++) if (curve[i] < curve[cmin]) cmin = i;
+  let k = cmin;
+  for (let step = 0; step < m - 1; step++) {
+    const prev = (k - 1 + m) % m;
+    if (curve[prev] >= curve[k]) k = prev; else break; // walk up the rise to its peak
+  }
+  return k;
+}
+
+// Roll a periodic curve so it starts at `start`, keeping it periodic.
+function rollCurve(curve, start) {
+  const m = curve.length - 1;
+  const s = ((start % m) + m) % m;
+  const out = [];
+  for (let i = 0; i < m; i++) out.push(curve[(s + i) % m]);
+  out.push(out[0]);
+  return out;
+}
+
+const REF_ROLLED = rollCurve(REF_SPEEDS, declineStartIndex(REF_SPEEDS) - PHASE_LEAD);
+
 // --- Signal processing ---
 
 function resample(times, values, n) {
@@ -1232,6 +1268,13 @@ function LiveCapture({ onSaveCurve, onBack }) {
     : null;
   const potentialShift = comparisonMean != null ? comparisonMean - REF_AVG : 0;
 
+  // Roll captured curves so the chart begins just before the catch deceleration
+  // (see PHASE_LEAD). Driven by the stroke on screen so the average and the
+  // inspected/last stroke stay mutually aligned; the reference uses its own.
+  const rollStart = comparisonCurve && comparisonCurve.length
+    ? declineStartIndex(comparisonCurve) - PHASE_LEAD
+    : 0;
+
   // Auto-scale the y-axis to whatever's plotted (shifted potential + the curves
   // shown), padded, so each stroke fills the frame instead of a fixed scale.
   const ys = REF_SPEEDS.map((s) => s + potentialShift);
@@ -1246,7 +1289,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     const datasets = [
       {
         label: 'Your potential',
-        data: REF_SPEEDS.map((s, i) => ({ x: PHASE_TIMES[i], y: s + potentialShift })),
+        data: REF_ROLLED.map((s, i) => ({ x: PHASE_TIMES[i], y: s + potentialShift })),
         borderColor: 'rgba(75, 192, 192, 1)',
         borderWidth: 3,
         borderDash: [5, 5],
@@ -1261,7 +1304,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
         label: individualStroke
           ? `Average (${displayCount} strokes)`
           : `Average (${displayCount} strokes)`,
-        data: displayAvgCurve.map((s, i) => ({ x: PHASE_TIMES[i], y: s })),
+        data: rollCurve(displayAvgCurve, rollStart).map((s, i) => ({ x: PHASE_TIMES[i], y: s })),
         borderColor: individualStroke ? 'rgba(102, 126, 234, 0.35)' : '#667eea',
         backgroundColor: individualStroke
           ? 'rgba(102, 126, 234, 0.04)'
@@ -1276,7 +1319,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     if (individualStroke) {
       datasets.push({
         label: `Stroke #${selectedIndex + 1} of ${strokes.length}`,
-        data: individualStroke.curve.map((s, i) => ({ x: PHASE_TIMES[i], y: s })),
+        data: rollCurve(individualStroke.curve, rollStart).map((s, i) => ({ x: PHASE_TIMES[i], y: s })),
         borderColor: '#ef4444',
         backgroundColor: 'rgba(239, 68, 68, 0.1)',
         borderWidth: 3,
@@ -1287,7 +1330,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     } else if (lastStroke && displayAvgCurve) {
       datasets.push({
         label: 'Last Stroke',
-        data: lastStroke.map((s, i) => ({ x: PHASE_TIMES[i], y: s })),
+        data: rollCurve(lastStroke, rollStart).map((s, i) => ({ x: PHASE_TIMES[i], y: s })),
         borderColor: 'rgba(255, 99, 132, 0.4)',
         borderWidth: 1.5,
         pointRadius: 0,
@@ -1297,7 +1340,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     }
 
     return { datasets };
-  }, [displayAvgCurve, lastStroke, displayCount, individualStroke, selectedIndex, strokes.length, potentialShift]);
+  }, [displayAvgCurve, lastStroke, displayCount, individualStroke, selectedIndex, strokes.length, potentialShift, rollStart]);
 
   // --- Stroke-time chart (one point per stroke, drag-to-select range) ---
 
