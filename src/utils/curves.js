@@ -57,23 +57,27 @@ export function rollToCatch(curve) {
 //   catch:    0 .. catchEnd    — deceleration into the slowest point
 //   drive:    catchEnd .. driveEnd — legs drive, the boat accelerates
 //   recovery: driveEnd .. 1    — coast back toward the next catch
-// catchEnd is the first deceleration→acceleration turn (the slowest point);
-// driveEnd is the next such turn past it with above-average speed (the recovery
-// surge), falling back to the speed peak when the curve has no second up-swing.
+// catchEnd is where deceleration stops: the first point the speed is no longer
+// dropping (its slowest point). driveEnd is the first speed peak past it — where
+// acceleration tapers off (the dip in acceleration) before the recovery —
+// falling back to the top speed when the curve never peaks.
 export function catchAlignedPhases(curve) {
   const m = curve.length - 1;
-  const avg = curve.slice(0, m).reduce((a, b) => a + b, 0) / m;
-  const accel = (i) => curve[(i + 1) % m] - curve[(i - 1 + m) % m];
-  const ups = [];
-  for (let i = 0; i < m; i++) if (accel(i) < 0 && accel((i + 1) % m) >= 0) ups.push((i + 1) % m);
-  let cmin = 0, cmax = 0;
-  for (let i = 1; i < m; i++) {
-    if (curve[i] < curve[cmin]) cmin = i;
-    if (curve[i] > curve[cmax]) cmax = i;
+  let catchIdx = 0;
+  for (let i = 0; i < m; i++) {
+    if (curve[(i + 1) % m] >= curve[i]) { catchIdx = i; break; }
+    catchIdx = i + 1;
   }
-  const t1 = ups.length ? ups[0] : cmin;
-  const t2 = ups.find((u) => u > t1 && curve[u] > avg) ?? cmax;
-  return { catchEnd: t1 / m, driveEnd: t2 / m };
+  let driveIdx = -1;
+  for (let step = 1; step < m; step++) {
+    const i = (catchIdx + step) % m;
+    if (curve[i] > curve[(i - 1 + m) % m] && curve[i] >= curve[(i + 1) % m]) { driveIdx = i; break; }
+  }
+  if (driveIdx < 0) {
+    driveIdx = 0;
+    for (let i = 1; i < m; i++) if (curve[i] > curve[driveIdx]) driveIdx = i;
+  }
+  return { catchEnd: catchIdx / m, driveEnd: driveIdx / m };
 }
 
 /**
