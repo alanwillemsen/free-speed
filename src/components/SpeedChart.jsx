@@ -75,9 +75,9 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, energyPenaltyPerc
 
   // Catch / drive / recovery of the "You now" curve, shown as labelled bands
   // split by the two phase boundaries (see catchAlignedPhases):
-  //   catch    — 0 until deceleration stops (the slowest point)
-  //   drive    — until the first speed peak (the dip in acceleration)
-  //   recovery — to the end of the stroke
+  //   catch    — the opening deceleration, until the steep drop eases
+  //   drive    — the long middle
+  //   recovery — the surge to top speed and back
   const phases = catchAlignedPhases(rolledB);
   const segments = [
     { name: 'Catch',    start: 0,               end: phases.catchEnd },

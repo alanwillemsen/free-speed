@@ -54,29 +54,44 @@ export function rollToCatch(curve) {
 }
 
 // Phase boundaries (fractions of the cycle, 0..1) for a catch-aligned curve:
-//   catch:    0 .. catchEnd    — deceleration into the slowest point
-//   drive:    catchEnd .. driveEnd — legs drive, the boat accelerates
-//   recovery: driveEnd .. 1    — coast back toward the next catch
-// catchEnd is where deceleration stops: the first point the speed is no longer
-// dropping (its slowest point). driveEnd is the first speed peak past it — where
-// acceleration tapers off (the dip in acceleration) before the recovery —
-// falling back to the top speed when the curve never peaks.
+//   catch:    0 .. catchEnd    — the opening deceleration
+//   drive:    catchEnd .. driveEnd — the long middle
+//   recovery: driveEnd .. 1    — the surge to top speed and back
+// Both boundaries are slope "knees" (same idea as catchStartIndex): catchEnd is
+// where the steep opening drop eases off; driveEnd is where the climb into the
+// top speed first becomes steep — the recovery surge beginning.
 export function catchAlignedPhases(curve) {
   const m = curve.length - 1;
-  let catchIdx = 0;
-  for (let i = 0; i < m; i++) {
-    if (curve[(i + 1) % m] >= curve[i]) { catchIdx = i; break; }
-    catchIdx = i + 1;
+  const d = (i) => curve[(i + 1) % m] - curve[i];
+
+  // Catch ends just past the steepest drop, at the first step whose decline is
+  // no longer steep (or turns upward).
+  let sStep = 0;
+  for (let i = 0; i < m; i++) if (d(i) < d(sStep)) sStep = i;
+  const maxDrop = -d(sStep);
+  let catchIdx = sStep + 1;
+  for (let i = sStep + 1; i < m; i++) {
+    catchIdx = i;
+    if (-d(i) < DECLINE_FRACTION * maxDrop) break;
   }
-  let driveIdx = -1;
-  for (let step = 1; step < m; step++) {
-    const i = (catchIdx + step) % m;
-    if (curve[i] > curve[(i - 1 + m) % m] && curve[i] >= curve[(i + 1) % m]) { driveIdx = i; break; }
+
+  // Drive ends where the recovery surge begins: walk back from the top speed to
+  // the trough feeding it, then forward to where the climb first turns steep.
+  let gmax = 0;
+  for (let i = 1; i < m; i++) if (curve[i] > curve[gmax]) gmax = i;
+  let trough = gmax;
+  for (let s = 0; s < m; s++) {
+    const prev = (trough - 1 + m) % m;
+    if (curve[prev] <= curve[trough]) trough = prev; else break;
   }
-  if (driveIdx < 0) {
-    driveIdx = 0;
-    for (let i = 1; i < m; i++) if (curve[i] > curve[driveIdx]) driveIdx = i;
+  const span = (gmax - trough + m) % m;
+  let maxRise = 0;
+  for (let i = 0; i < span; i++) { const r = d((trough + i) % m); if (r > maxRise) maxRise = r; }
+  let driveIdx = trough;
+  for (let i = 0; i < span; i++) {
+    if (d((trough + i) % m) >= DECLINE_FRACTION * maxRise) { driveIdx = (trough + i) % m; break; }
   }
+
   return { catchEnd: catchIdx / m, driveEnd: driveIdx / m };
 }
 
