@@ -1216,8 +1216,10 @@ function LiveCapture({ onSaveCurve, onBack }) {
     reader.readAsText(file);
   };
 
-  const handleSave = () => {
-    const curveToSave = displayAvgCurve;
+  const handleOpenInCalculator = () => {
+    // Open whatever's on the chart: a single inspected stroke when one is
+    // selected, otherwise the average of the reviewed strokes.
+    const curveToSave = individualStroke ? individualStroke.curve : displayAvgCurve;
     if (!curveToSave || !onSaveCurve) return;
 
     let scaledSpeeds;
@@ -1229,14 +1231,17 @@ function LiveCapture({ onSaveCurve, onBack }) {
       // 2000m finish time at the measured average boat speed
       if (curAvg > 0) raceTime = 2000 / curAvg;
     } else {
-      // Scale captured average so its mean matches the reference curve
+      // Scale the captured curve so its mean matches the reference curve
       const curAvg = curveToSave.reduce((a, b) => a + b, 0) / curveToSave.length;
       const scale = REF_AVG / curAvg;
       scaledSpeeds = curveToSave.map(v => v * scale);
     }
+    const desc = individualStroke
+      ? `1 stroke at ${displayStrokeRate} spm${hasGPSAnchoring ? ' (GPS)' : ''}`
+      : `${displayCount} strokes at ${displayStrokeRate} spm${hasGPSAnchoring ? ' (GPS)' : ''}`;
     onSaveCurve({
       name: `Live Capture ${new Date().toLocaleString()}`,
-      desc: `${displayCount} strokes at ${displayStrokeRate} spm${hasGPSAnchoring ? ' (GPS)' : ''}`,
+      desc,
       speeds: scaledSpeeds,
       strokeRate: displayStrokeRate || 36,
       raceTime,
@@ -1830,8 +1835,8 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const sessionActions = (
     <>
       {avgCurve && (
-        <button className="btn btn-primary btn-large" onClick={handleSave}>
-          Save & Open in Calculator
+        <button className="btn btn-primary btn-large" onClick={handleOpenInCalculator}>
+          Open in Calculator
         </button>
       )}
       {hasRecording && (
@@ -1908,8 +1913,8 @@ function LiveCapture({ onSaveCurve, onBack }) {
               )
             )}
             {avgCurve && (
-              <button className="btn btn-primary btn-large" onClick={handleSave}>
-                Save & Open in Calculator
+              <button className="btn btn-primary btn-large" onClick={handleOpenInCalculator}>
+                Open in Calculator
               </button>
             )}
             {(hasRecording || (isWatching && strokeCount > 0)) && (
