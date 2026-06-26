@@ -851,6 +851,17 @@ function LiveCapture({ onSaveCurve, onBack }) {
     return () => window.removeEventListener('deviceorientation', handler);
   }, [isCapturing]);
 
+  // Keep the screen awake whenever this phone is in coach mode — the coach
+  // stares at the readout without touching the screen, so Android would
+  // otherwise sleep it mid-piece. The hook returns a fresh wrapper each
+  // render, so depend on the stable callbacks rather than the object.
+  const { request: wakeLockRequest, release: wakeLockRelease } = wakeLock;
+  useEffect(() => {
+    if (linkRole !== 'coach') return;
+    wakeLockRequest();
+    return () => wakeLockRelease();
+  }, [linkRole, wakeLockRequest, wakeLockRelease]);
+
   // Periodic UI refresh during capture or while watching a coach stream
   // (avoids 60 Hz React renders)
   useEffect(() => {
