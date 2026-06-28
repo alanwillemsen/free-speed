@@ -13,6 +13,7 @@ import {
 import { Line } from 'react-chartjs-2';
 import annotationPlugin from 'chartjs-plugin-annotation';
 import { catchStartIndex, rollCurve, catchAlignedPhases } from '../utils/curves';
+import { useChartChrome } from '../utils/chartTheme';
 
 ChartJS.register(
   CategoryScale,
@@ -142,6 +143,7 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, energyPenaltyPerc
     ],
   };
 
+  const chrome = useChartChrome();
   const options = {
     responsive: true,
     maintainAspectRatio: false,
@@ -155,6 +157,7 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, energyPenaltyPerc
         labels: {
           usePointStyle: true,
           pointStyle: 'line',
+          color: chrome.title,
           font: {
             size: 14,
             weight: 'bold'
@@ -173,6 +176,7 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, energyPenaltyPerc
       title: {
         display: true,
         text: 'Per-stroke speed profile',
+        color: chrome.title,
         font: {
           size: 18,
           weight: 'bold'
@@ -196,15 +200,18 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, energyPenaltyPerc
         ticks: {
           maxTicksLimit: 10,
           callback: (val) => val.toFixed(2),
+          color: chrome.tick,
           font: {
             size: 11
           }
         },
+        grid: { color: chrome.grid },
       },
       y: {
         title: {
           display: true,
           text: 'Boat Speed (m/s)',
+          color: chrome.title,
           font: {
             size: 14,
             weight: 'bold'
@@ -213,10 +220,12 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, energyPenaltyPerc
         min: yMin,
         max: yMax,
         ticks: {
+          color: chrome.tick,
           font: {
             size: 11
           }
-        }
+        },
+        grid: { color: chrome.grid }
       },
     },
   };
@@ -302,7 +311,7 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, energyPenaltyPerc
       <div className="chart-wrapper">
         <Line key={strokeRate} ref={chartRef} data={data} options={options} />
       </div>
-      <div style={{ textAlign: 'center', fontSize: '0.85rem', color: '#666', marginTop: '0.25rem' }}>
+      <div style={{ textAlign: 'center', fontSize: '0.85rem', color: 'var(--text-faint)', marginTop: '0.25rem' }}>
         Time (s) at&nbsp;
         <select
           value={strokeRate}

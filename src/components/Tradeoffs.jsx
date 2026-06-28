@@ -1,4 +1,5 @@
 import { useState, useRef } from 'react';
+import AppShell from './AppShell';
 
 const STROKE = ['speed', 'effort', 'rate', 'handLength', 'ratio'];
 const RIGGING = ['outboard', 'inboard', 'span'];
@@ -102,7 +103,7 @@ function solveAbsorbers(equations, absorbers, b) {
   return dY;
 }
 
-export default function Tradeoffs({ onBack }) {
+export default function Tradeoffs() {
   const [values, setValues] = useState(() =>
     Object.fromEntries(ALL.map(k => [k, INITIAL]))
   );
@@ -191,13 +192,8 @@ export default function Tradeoffs({ onBack }) {
   };
 
   return (
+    <AppShell page="tradeoffs" title="Tradeoffs" actions={<button className="btn btn-sm" onClick={reset}>Reset</button>}>
     <div className="tradeoffs-page">
-      <header className="tradeoffs-header">
-        <button className="btn" onClick={onBack}>← Back</button>
-        <h1>Tradeoffs</h1>
-        <button className="btn" onClick={reset}>Reset</button>
-      </header>
-
       <div className="tradeoffs-body">
         <p className="tradeoffs-intro">
           Lock the variables you want to hold constant. Move a slider to see what gives.
@@ -245,6 +241,7 @@ export default function Tradeoffs({ onBack }) {
 
       </div>
     </div>
+    </AppShell>
   );
 }
 

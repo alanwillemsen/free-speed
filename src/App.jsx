@@ -5,7 +5,9 @@ import SavedCurves, { parseShareHash, EXAMPLE_CURVES } from './components/SavedC
 import CurveHeader from './components/CurveHeader';
 import LiveCapture from './components/LiveCapture';
 import OarCapture from './components/OarCapture';
+import VideoAnalysis from './components/VideoAnalysis';
 import Tradeoffs from './components/Tradeoffs';
+import AppShell from './components/AppShell';
 import { normalizeCurve } from './utils/curves';
 import { calculateEnergy, calculateAveragePower, estimateFinishTime, calculateEnergyPenalty } from './utils/physics';
 import referenceCurveData from './data/referenceCurve.json';
@@ -20,6 +22,7 @@ function App() {
     const h = window.location.hash;
     if (h === '#live' || h.startsWith('#live?')) return 'live';
     if (h === '#oar' || h.startsWith('#oar?')) return 'oar';
+    if (h === '#analyze' || h.startsWith('#analyze?')) return 'analyze';
     if (h === '#tradeoffs') return 'tradeoffs';
     return 'calculator';
   };
@@ -30,10 +33,6 @@ function App() {
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
-
-  useEffect(() => {
-    document.documentElement.classList.toggle('live-mode', activePage === 'live');
-  }, [activePage]);
 
   const [curveARaw] = useState({
     times: referenceCurveData.times,
@@ -200,36 +199,28 @@ function App() {
   const penalty = calculateEnergyPenalty(energyBNorm * raceTime, energyA * raceTime);
 
   if (activePage === 'live') {
-    return (
-      <LiveCapture
-        onSaveCurve={handleSaveLiveCurve}
-        onBack={() => { window.location.hash = ''; }}
-      />
-    );
+    return <LiveCapture onSaveCurve={handleSaveLiveCurve} />;
   }
 
   if (activePage === 'oar') {
-    return <OarCapture onBack={() => { window.location.hash = ''; }} />;
+    return <OarCapture />;
+  }
+
+  if (activePage === 'analyze') {
+    return <VideoAnalysis />;
   }
 
   if (activePage === 'tradeoffs') {
-    return <Tradeoffs onBack={() => { window.location.hash = ''; }} />;
+    return <Tradeoffs />;
   }
 
   return (
+    <AppShell page="calculator" title="Rowing Efficiency Calculator">
     <div className="app">
-      <header className="app-header">
-        <h1>Rowing Efficiency Calculator</h1>
-        <p className="subtitle">
-          How much time are you leaving on the water? Draw a boat speed profile and see how
-          a smoother stroke — same average speed, less energy — translates to a faster finish time.
-        </p>
-        <div className="header-links">
-          <a href="#live" className="live-capture-link">Live Stroke Capture</a>
-          <a href="#tradeoffs" className="live-capture-link">Tradeoffs</a>
-          {/* Oar Capture is hidden from users; reach it by navigating to #oar directly. */}
-        </div>
-      </header>
+      <p className="subtitle">
+        How much time are you leaving on the water? Draw a boat speed profile and see how
+        a smoother stroke — same average speed, less energy — translates to a faster finish time.
+      </p>
 
       <div className="app-content">
         <SavedCurves
@@ -274,27 +265,8 @@ function App() {
           />
         </div>
       </div>
-
-      <footer className="app-footer">
-        <div className="footer-links">
-          <a href="/math.html" target="_blank" rel="noopener noreferrer">
-            Mathematical background — energy-equivalence model, variables, and derivations
-          </a>
-          <a href="https://github.com/alanwillemsen/free-speed" target="_blank" rel="noopener noreferrer" aria-label="GitHub repository">
-            <svg height="20" width="20" viewBox="0 0 16 16" fill="currentColor">
-              <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38
-                0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13
-                -.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66
-                .07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15
-                -.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27
-                .68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12
-                .51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48
-                0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
-            </svg>
-          </a>
-        </div>
-      </footer>
     </div>
+    </AppShell>
   );
 }
 

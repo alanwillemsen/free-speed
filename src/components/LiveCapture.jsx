@@ -13,286 +13,32 @@ import { Line } from 'react-chartjs-2';
 import LiveBigScreen from './LiveBigScreen';
 import { usePeerLink } from '../hooks/usePeerLink';
 import { useWakeLock } from '../hooks/useWakeLock';
+import { useVideoRecorder } from '../hooks/useVideoRecorder';
+import AppShell from './AppShell';
+import { useChartChrome } from '../utils/chartTheme';
 import * as sessionStore from '../utils/sessionStore';
+import * as pairStore from '../utils/pairStore';
+import * as videoStore from '../utils/videoStore';
+import { packBundle } from '../utils/videoBundle';
 import { catchStartIndex, rollCurve } from '../utils/curves';
-import referenceCurveData from '../data/referenceCurve.json';
+import {
+  NUM_POINTS, MIN_ROW_SPEED, MAX_ROW_SPEED, SPLIT_WINDOW_MS,
+  REF_SPEEDS, REF_AVG, REF_ROLLED, PHASE_TIMES,
+  windowedGpsSpeed, averageCurves, freeSpeedSecondsFor,
+  makeProc, feedSample, buildReplayEvents, subtractGravity,
+} from '../utils/strokePipeline';
 
 ChartJS.register(LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler);
 
-// --- Constants ---
-const NUM_POINTS = 33;
-const NOISE_ALPHA = 0.4;          // EMA alpha for noise reduction
-const STROKE_DETECT_ALPHA = 0.06; // EMA alpha for stroke boundary detection
-const MIN_STROKE_MS = 800;
-const MAX_STROKE_MS = 4000;
-const MAX_STROKES = 500;          // Rolling window for averaging
+// --- Constants (UI / networking; signal-processing constants and the stroke
+// engine live in utils/strokePipeline) ---
 const UI_UPDATE_MS = 250;
-const CALIBRATION_MS = 3000;      // Auto-orientation calibration window
-// Continuous orientation re-evaluation (handles a mid-session remount / handoff).
-// The boat-motion direction is tracked as a free 3D vector (the PCA principal
-// axis of acceleration), so any mounting angle works — not just the device's
-// x/y/z faces. Small shifts are followed smoothly; a large, sustained jump is
-// treated as a remount and snaps (resetting stroke detection).
-const ORIENT_WINDOW_MS = 5000;    // rolling window for the direction estimate (a stroke+)
-const ORIENT_REEVAL_MS = 1000;    // recompute the motion direction at most this often
-const ORIENT_SWITCH_MS = 2500;    // a remount must persist this long before we snap to it
-const ORIENT_SWITCH_DEG = 35;     // direction jump beyond this = remount, not drift
-const ORIENT_MIN_VAR = 0.5;       // below this variance = no real motion; don't update
 const SEND_BATCH_MS = 100;        // Batch outgoing samples this often when coach-linked
 const PERSIST_FLUSH_MS = 2000;    // Flush new samples to IndexedDB this often (crash recovery)
-const SPLIT_WINDOW_MS = 5000;     // GPS-speed averaging window for per-stroke split
-// Rowing happens only within this 500m-split band. Outside it the boat is
-// drifting/stopped (slower than 4:00) or the reading is a GPS spike (faster than
-// 1:00). Capture pauses outside the band and auto-resumes inside it; a valid
-// in-band GPS speed is required to record at all.
-const MIN_ROW_SPEED = 500 / 240;  // 2.08 m/s — a 4:00 /500m split
-const MAX_ROW_SPEED = 500 / 60;   // 8.33 m/s — a 1:00 /500m split
-
-const PHASE_TIMES = Array.from({ length: NUM_POINTS }, (_, i) => i / (NUM_POINTS - 1));
-const REF_SPEEDS = referenceCurveData.speeds;
-const REF_AVG = REF_SPEEDS.reduce((a, b) => a + b, 0) / REF_SPEEDS.length;
-
-// Phase alignment. A stroke reads best when it begins at the catch — where the
-// boat's speed drops hard into its slowest point as the legs drive against the
-// footboard. catchStartIndex / rollCurve (shared with the calculator chart in
-// utils/curves) roll the periodic curve to put that point at the left edge
-// (0.00 s). Roll-invariant for mean/mean-cube, so split and free-speed are
-// unaffected — it only sets where the x-axis begins.
-const REF_ROLLED = rollCurve(REF_SPEEDS, catchStartIndex(REF_SPEEDS));
-
-// --- Signal processing ---
-
-function resample(times, values, n) {
-  if (times.length < 2) return new Array(n).fill(0);
-  const t0 = times[0], t1 = times[times.length - 1];
-  const dur = t1 - t0;
-  if (dur <= 0) return new Array(n).fill(values[0] || 0);
-  const out = [];
-  for (let i = 0; i < n; i++) {
-    const t = t0 + dur * i / (n - 1);
-    let j = 0;
-    while (j < times.length - 2 && times[j + 1] < t) j++;
-    const dt = times[j + 1] - times[j];
-    const frac = dt > 0 ? (t - times[j]) / dt : 0;
-    out.push(values[j] + frac * (values[j + 1] - values[j]));
-  }
-  return out;
-}
-
-function subtractGravity(accelIncGravity, beta, gamma) {
-  const G = 9.81;
-  const betaRad = (beta ?? 0) * Math.PI / 180;
-  const gammaRad = (gamma ?? 0) * Math.PI / 180;
-  const gx = G * Math.sin(gammaRad);
-  const gy = G * Math.sin(betaRad) * Math.cos(gammaRad);
-  const gz = G * Math.cos(betaRad) * Math.cos(gammaRad);
-  return {
-    x: (accelIncGravity.x ?? 0) - gx,
-    y: (accelIncGravity.y ?? 0) - gy,
-    z: (accelIncGravity.z ?? 0) - gz,
-  };
-}
-
-function variance(arr) {
-  if (arr.length === 0) return 0;
-  const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
-  return arr.reduce((s, v) => s + (v - mean) ** 2, 0) / arr.length;
-}
-
-// Identify the boat's fore-aft (surge) direction as a free 3D unit vector: the
-// principal axis of the acceleration cloud — the direction along which motion
-// varies most. Found by power-iterating the 3×3 covariance, so it works at any
-// mounting angle, not just when an axis happens to line up with the boat.
-// Shared by the initial calibration and the continuous re-evaluation. Returns a
-// signed unit vector (oriented so the drive's biggest spike reads positive) plus
-// the variance along it (for the "is the boat really moving" gate). `warm` seeds
-// the iteration with the previous direction for fast, continuous convergence.
-function principalDirection(x, y, z, warm) {
-  const n = x.length;
-  if (n < 2) return null;
-  // Mean-center so any residual gravity DC can't bias the direction.
-  let mx = 0, my = 0, mz = 0;
-  for (let i = 0; i < n; i++) { mx += x[i]; my += y[i]; mz += z[i]; }
-  mx /= n; my /= n; mz /= n;
-  // Covariance matrix (symmetric — six unique entries).
-  let cxx = 0, cyy = 0, czz = 0, cxy = 0, cxz = 0, cyz = 0;
-  for (let i = 0; i < n; i++) {
-    const dx = x[i] - mx, dy = y[i] - my, dz = z[i] - mz;
-    cxx += dx * dx; cyy += dy * dy; czz += dz * dz;
-    cxy += dx * dy; cxz += dx * dz; cyz += dy * dz;
-  }
-  cxx /= n; cyy /= n; czz /= n; cxy /= n; cxz /= n; cyz /= n;
-  // Power iteration → dominant eigenvector (the principal direction).
-  let vx = warm?.x ?? 1, vy = warm?.y ?? 0, vz = warm?.z ?? 0;
-  let lambda = 0;
-  for (let it = 0; it < 24; it++) {
-    const nx = cxx * vx + cxy * vy + cxz * vz;
-    const ny = cxy * vx + cyy * vy + cyz * vz;
-    const nz = cxz * vx + cyz * vy + czz * vz;
-    const mag = Math.hypot(nx, ny, nz);
-    if (mag < 1e-12) break;
-    vx = nx / mag; vy = ny / mag; vz = nz / mag;
-    lambda = mag; // ≈ variance along v (Rayleigh quotient, v is unit)
-  }
-  // Orient the vector so the drive (largest excursion) projects positive.
-  let maxAbs = 0, signedMax = 1;
-  for (let i = 0; i < n; i++) {
-    const p = (x[i] - mx) * vx + (y[i] - my) * vy + (z[i] - mz) * vz;
-    if (Math.abs(p) > maxAbs) { maxAbs = Math.abs(p); signedMax = p; }
-  }
-  if (signedMax < 0) { vx = -vx; vy = -vy; vz = -vz; }
-  return { dir: { x: vx, y: vy, z: vz }, variance: lambda };
-}
-
-// Angle (degrees) between two unit vectors.
-function angleBetween(a, b) {
-  const dot = Math.max(-1, Math.min(1, a.x * b.x + a.y * b.y + a.z * b.z));
-  return Math.acos(dot) * 180 / Math.PI;
-}
-
-function processStroke(samples) {
-  if (samples.length < 10) return null;
-
-  // Integrate acceleration → relative velocity (trapezoidal rule)
-  const vel = [0];
-  for (let i = 1; i < samples.length; i++) {
-    const dt = (samples[i].time - samples[i - 1].time) / 1000;
-    vel.push(vel[i - 1] + (samples[i - 1].accel + samples[i].accel) / 2 * dt);
-  }
-
-  // Remove linear drift to enforce periodicity (v_start ≈ v_end)
-  const drift = (vel[vel.length - 1] - vel[0]) / (vel.length - 1);
-  for (let i = 0; i < vel.length; i++) {
-    vel[i] -= drift * i;
-  }
-
-  const minV = Math.min(...vel);
-  const maxV = Math.max(...vel);
-  const range = maxV - minV;
-  if (range < 0.001) return null;
-
-  // Scale to match the reference curve's speed range for visual comparison
-  const refMin = Math.min(...REF_SPEEDS);
-  const refMax = Math.max(...REF_SPEEDS);
-  const scaled = vel.map(v => refMin + ((v - minV) / range) * (refMax - refMin));
-
-  // Resample to standard point count
-  const times = samples.map(s => s.time);
-  const resampled = resample(times, scaled, NUM_POINTS);
-  resampled[NUM_POINTS - 1] = resampled[0]; // Enforce periodicity
-  return resampled;
-}
-
-function processStrokeWithGPS(samples, gpsSpeeds) {
-  if (samples.length < 10) return null;
-
-  // Trapezoidal integration of acceleration → relative velocity
-  const vel = [0];
-  for (let i = 1; i < samples.length; i++) {
-    const dt = (samples[i].time - samples[i - 1].time) / 1000;
-    vel.push(vel[i - 1] + (samples[i - 1].accel + samples[i].accel) / 2 * dt);
-  }
-  const times = samples.map(s => s.time);
-  const t0 = times[0], t1 = times[times.length - 1];
-
-  // Find GPS readings within this stroke's time window
-  const relevant = gpsSpeeds.filter(g => g.time >= t0 - 500 && g.time <= t1 + 500);
-  if (relevant.length < 1) return null; // caller falls back to processStroke
-
-  // Interpolate integrated velocity at each GPS timestamp, compute offsets
-  const offsets = relevant.map(g => {
-    let idx = 0;
-    while (idx < times.length - 2 && times[idx + 1] < g.time) idx++;
-    const frac = (times[idx + 1] - times[idx]) > 0
-      ? Math.max(0, Math.min(1, (g.time - times[idx]) / (times[idx + 1] - times[idx])))
-      : 0;
-    const interpVel = vel[idx] + frac * (vel[idx + 1] - vel[idx]);
-    return { time: g.time, offset: g.speed - interpVel };
-  });
-
-  // Fit linear correction: constant offset (1 GPS point) or linear regression (2+)
-  let a, b;
-  if (offsets.length === 1) {
-    a = offsets[0].offset;
-    b = 0;
-  } else {
-    const n = offsets.length;
-    const sumT = offsets.reduce((s, o) => s + o.time, 0);
-    const sumO = offsets.reduce((s, o) => s + o.offset, 0);
-    const sumTT = offsets.reduce((s, o) => s + o.time * o.time, 0);
-    const sumTO = offsets.reduce((s, o) => s + o.time * o.offset, 0);
-    const denom = n * sumTT - sumT * sumT;
-    if (Math.abs(denom) < 1e-12) {
-      a = sumO / n;
-      b = 0;
-    } else {
-      b = (n * sumTO - sumT * sumO) / denom;
-      a = (sumO - b * sumT) / n;
-    }
-  }
-
-  // Apply correction → absolute m/s velocity
-  const anchored = vel.map((v, i) => v + a + b * times[i]);
-
-  // Sanity check: speeds should be positive and reasonable for rowing (0-10 m/s)
-  const minAnchored = Math.min(...anchored);
-  if (minAnchored < -1) return null; // GPS data is inconsistent, fall back
-
-  const resampled = resample(times, anchored, NUM_POINTS);
-  resampled[NUM_POINTS - 1] = resampled[0];
-  return resampled;
-}
-
-// Average GPS speed (m/s) over [endTime - windowMs, endTime], dropping
-// non-positive and implausibly high readings. GPS is ~1 Hz, so a single stroke
-// is too sparse for an accurate split; the multi-second window filters jitter.
-// Returns null when no usable sample falls in the window.
-function windowedGpsSpeed(gpsSpeeds, endTime, windowMs) {
-  const start = endTime - windowMs;
-  let sum = 0, n = 0;
-  for (const g of gpsSpeeds) {
-    if (g.time >= start && g.time <= endTime && g.speed > 0 && g.speed < MAX_ROW_SPEED) {
-      sum += g.speed;
-      n++;
-    }
-  }
-  return n > 0 ? sum / n : null;
-}
-
-function averageCurves(strokes) {
-  if (strokes.length === 0) return null;
-  const avg = new Array(NUM_POINTS).fill(0);
-  for (const s of strokes) {
-    const curve = s.curve ?? s;
-    for (let i = 0; i < NUM_POINTS; i++) avg[i] += curve[i];
-  }
-  for (let i = 0; i < NUM_POINTS; i++) avg[i] /= strokes.length;
-  return avg;
-}
-
-// "Free speed" (m/s): the average boat speed you'd gain by matching the
-// potential curve's *shape* at your current effort. Drag power ∝ v³, so a given
-// average power (∝ mean of v³) yields the highest average speed when the speed
-// is steadiest — any variation costs speed (Jensen's inequality). We scale the
-// potential shape to your stroke's mean-cube (i.e. same power), then compare
-// average speeds. Same shape → 0 at any pace; the gain comes only from your
-// curve carrying more speed variation than the reference. Positive = speed left
-// on the table; negative = you're already smoother than potential (rare).
-// Both curves must be in real m/s, so this is GPS-anchored only.
-function freeSpeedGain(yourCurve, potentialCurve) {
-  if (!yourCurve || yourCurve.length === 0) return null;
-  const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
-  const meanCube = (a) => a.reduce((s, v) => s + v * v * v, 0) / a.length;
-  const yourPower = meanCube(yourCurve);
-  const potPower = meanCube(potentialCurve);
-  if (yourPower <= 0 || potPower <= 0) return null;
-  const scale = Math.cbrt(yourPower / potPower); // potential rescaled to your power
-  return scale * mean(potentialCurve) - mean(yourCurve);
-}
 
 // --- Component ---
 
-function LiveCapture({ onSaveCurve, onBack }) {
+function LiveCapture({ onSaveCurve }) {
   const [isCapturing, setIsCapturing] = useState(false);
   const [sensorStatus, setSensorStatus] = useState('checking');
   // Outdoor full-screen readout (split + spm + speed profile). Capture keeps
@@ -302,11 +48,27 @@ function LiveCapture({ onSaveCurve, onBack }) {
   // Coach link: 'rower' = this phone is mounted in the boat and (optionally)
   // streams to a coach; 'coach' = this phone watches a rower's stream and runs
   // the same processing pipeline on the received samples.
-  const [linkRole, setLinkRole] = useState('rower');
+  const [linkRole, setLinkRole] = useState(() => pairStore.getRole());
   const [isWatching, setIsWatching] = useState(false); // coach is receiving a live session
+  // Persistent coach-link identity (stable peer id + advertised name) and, for a
+  // coach, the saved roster of rowers plus their live online/busy presence.
+  const [identity] = useState(() => pairStore.getIdentity());
+  const [linkName, setLinkName] = useState(identity.name);
+  const [roster, setRoster] = useState(() => pairStore.getRoster());
+  const [presence, setPresence] = useState({}); // peer id -> { online, busy, name }
+  const [linkedPeerName, setLinkedPeerName] = useState(''); // name the connected peer (rower or coach) advertised
+  // Mirrors so the peer-link presence responder (called from inside the hook)
+  // always sees the current name / capturing state.
+  const identityNameRef = useRef(identity.name);
+  identityNameRef.current = linkName;
+  const isCapturingRef = useRef(false);
+  isCapturingRef.current = isCapturing;
   // Coach can pause the live feed to inspect individual strokes without stopping
   // the stream — the proc keeps accumulating in the background and resume catches up.
   const [isPaused, setIsPaused] = useState(false);
+  // Rower: the coach link runs automatically, so its QR / code / name pairing UI
+  // is tucked behind a "Configure coach link" toggle rather than shown inline.
+  const [showLinkConfig, setShowLinkConfig] = useState(false);
 
   // UI state (synced from refs periodically during capture)
   const [strokeRate, setStrokeRate] = useState(0);
@@ -324,8 +86,16 @@ function LiveCapture({ onSaveCurve, onBack }) {
   // in full screen) to mark a new piece; `session` is the whole capture.
   const [pieceDistance, setPieceDistance] = useState(0);
   const [sessionDistance, setSessionDistance] = useState(0);
+  // Mean per-stroke free speed (s/2k) over the current piece, or null. Shown on
+  // the big screen under the latest stroke's free speed; resets with the piece.
+  const [avgFreeSpeedSeconds, setAvgFreeSpeedSeconds] = useState(null);
   const [hasRecording, setHasRecording] = useState(false);
   const [isReplaying, setIsReplaying] = useState(false);
+  // Real-time replay: play a recorded row back through the live pipeline at
+  // wall-clock pace so the live UI (split, spm, big screen, rowing indicator)
+  // animates exactly as on the water — lets UI changes be tested from a desk.
+  const [liveReplayActive, setLiveReplayActive] = useState(false);
+  const [replaySpeed, setReplaySpeed] = useState(1);
   // Snapshot of all strokes after stop/replay — enables time-range selection.
   // Each entry: { time: ms, curve: number[NUM_POINTS], avgSpeed: number }.
   const [strokes, setStrokes] = useState([]);
@@ -337,17 +107,23 @@ function LiveCapture({ onSaveCurve, onBack }) {
 
   // Processing state lives in refs to avoid stale closures in the 60 Hz handler
   const procRef = useRef(null);
-  // Boat fore-aft direction in device frame (unit vector). Default points along
-  // +y until calibration locks it; updated continuously while rowing.
-  const dirRef = useRef({ x: 0, y: 1, z: 0 });
+  // Boat fore-aft direction now lives on proc.direction (set by the shared
+  // engine in utils/strokePipeline) — no separate ref needed.
   const orientationRef = useRef({ beta: 0, gamma: 0 });
   const gpsRef = useRef({ speeds: [], watchId: null });
   // Accumulated distance (m) from trapezoidal integration of GPS speed. `piece`
   // is resettable; `session` runs the whole capture. last* hold the previous
   // sample for the integration step.
   const distanceRef = useRef({ piece: 0, session: 0, lastTime: null, lastSpeed: 0 });
+  // Running sum/count of per-stroke free-speed (s/2k) for the current piece, so
+  // the big screen can show a piece average alongside the latest stroke's value.
+  // Reset together with the piece distance (start, full reset, piece reset).
+  const pieceFreeSpeedRef = useRef({ sum: 0, count: 0 });
   const recordingRef = useRef(null);
   const fileInputRef = useRef(null);
+  // Holds the in-flight real-time replay loop ({ cancel, recording, ... }) or
+  // null. Non-null marks a live replay (vs. a real sensor capture).
+  const replayRef = useRef(null);
   const sendBufferRef = useRef({ motion: [], orientation: [], gps: [] });
   const sendIntervalRef = useRef(null);
   const calibSentRef = useRef(false); // rower: calib message sent to coach once
@@ -355,8 +131,27 @@ function LiveCapture({ onSaveCurve, onBack }) {
   // New samples since the last IndexedDB flush (crash-recovery persistence).
   const persistBufferRef = useRef({ motion: [], orientation: [], gps: [] });
   const persistIntervalRef = useRef(null);
+  // Coach video: clock offset bridging the rower's sample clock and the coach's
+  // wall/video clock (coachPerf ≈ rowerTime + offset), and the video anchor
+  // captured when recording starts. lastPingRef mirrors link.lastPing for the
+  // offset's transit correction without re-subscribing handlePeerData.
+  const rowerToCoachRef = useRef(null);
+  const videoAnchorRef = useRef(null);
+  const lastPingRef = useRef(null);
+  // Coach diagnostics: count samples received from the rower so we can tell
+  // "not receiving" apart from "receiving but not detecting".
+  const recvRef = useRef({ motion: 0, gps: 0, orientation: 0 });
+  const [coachDiag, setCoachDiag] = useState('');
 
   const wakeLock = useWakeLock();
+  const videoRecorder = useVideoRecorder();
+  // Coach video UI: whether the camera/preview is armed, and the finished bundle
+  // ({ blob, meta }) once a recording stops — surfaces the share/analyze actions.
+  const [videoArmed, setVideoArmed] = useState(false);
+  const [videoBundle, setVideoBundle] = useState(null);
+  const [savingBundle, setSavingBundle] = useState(false);
+  const previewVideoRef = useRef(null);
+  const cameraFsRef = useRef(null);
 
   // Integrate one GPS speed sample (m/s at ms `time`) into the running piece and
   // session distances by the trapezoidal rule. Skips backward/large gaps (tab
@@ -378,14 +173,25 @@ function LiveCapture({ onSaveCurve, onBack }) {
 
   const resetDistance = () => {
     distanceRef.current = { piece: 0, session: 0, lastTime: null, lastSpeed: 0 };
+    pieceFreeSpeedRef.current = { sum: 0, count: 0 };
     setPieceDistance(0);
     setSessionDistance(0);
+    setAvgFreeSpeedSeconds(null);
   };
 
-  // Mark a new piece — full-screen long-press. Keeps the session total.
+  // Mark a new piece — full-screen long-press. Keeps the session total but
+  // restarts the piece distance and free-speed average.
   const resetPiece = () => {
     distanceRef.current.piece = 0;
+    pieceFreeSpeedRef.current = { sum: 0, count: 0 };
     setPieceDistance(0);
+    setAvgFreeSpeedSeconds(null);
+  };
+
+  // Push the current piece's mean free speed (s/2k) to state, or null if none.
+  const publishAvgFreeSpeed = () => {
+    const fp = pieceFreeSpeedRef.current;
+    setAvgFreeSpeedSeconds(fp.count > 0 ? fp.sum / fp.count : null);
   };
 
   // A previous capture that didn't end cleanly (crash / reload / tab reap),
@@ -461,215 +267,37 @@ function LiveCapture({ onSaveCurve, onBack }) {
       return;
     }
 
-    // --- Auto-orientation calibration ---
-    if (!proc.calibration.done) {
-      proc.calibration.samples.x.push(accelValues.x ?? 0);
-      proc.calibration.samples.y.push(accelValues.y ?? 0);
-      proc.calibration.samples.z.push(accelValues.z ?? 0);
-
-      if (now - proc.calibration.startTime >= CALIBRATION_MS) {
-        const c = proc.calibration.samples;
-        // Lock the boat's fore-aft direction from the motion so far — any
-        // mounting angle, no axis assumptions.
-        const pd = principalDirection(c.x, c.y, c.z);
-
-        if (!pd || pd.variance < ORIENT_MIN_VAR) {
-          // No meaningful motion yet — extend calibration
-          proc.calibration.startTime = now;
-          proc.calibration.samples = { x: [], y: [], z: [] };
-          return;
-        }
-
-        dirRef.current = pd.dir;
-        proc.direction = pd.dir;
-        proc.calibration.done = true;
-      }
-      return; // Don't process strokes during calibration
-    }
-
-    proc.lastSampleTime = now;
-
-    // --- Continuous orientation tracking ---
-    // The boat-motion direction can change mid-session if the phone is moved or
-    // handed to another rower. Keep a rolling window and re-estimate the
-    // principal direction periodically. A small change is followed smoothly
-    // (handles gradual shifts); a large, sustained change is treated as a
-    // remount and snaps, resetting stroke detection so the handoff isn't
-    // measured as a stroke. (Variance-based, so rough water doesn't fool it —
-    // chop has no consistent direction; the stroke rhythm does.)
-    const ori = proc.orient;
-    ori.window.push({
-      t: now,
-      x: accelValues.x ?? 0,
-      y: accelValues.y ?? 0,
-      z: accelValues.z ?? 0,
+    // Run the shared stroke-detection engine (calibration, orientation tracking,
+    // boundary detection). It mutates proc and returns the newly completed
+    // stroke (or null). Live capture requires GPS to record; replay/coach-fed
+    // data (nowOverride set) records without it.
+    const stroke = feedSample(proc, accelValues, now, gpsRef.current.speeds, {
+      allowWithoutGps: nowOverride != null,
     });
-    const wcut = now - ORIENT_WINDOW_MS;
-    while (ori.window.length && ori.window[0].t < wcut) ori.window.shift();
 
-    if (
-      now - ori.lastEval >= ORIENT_REEVAL_MS &&
-      ori.window.length >= 20 &&
-      now - ori.window[0].t >= ORIENT_WINDOW_MS / 2
-    ) {
-      ori.lastEval = now;
-      const w = ori.window;
-      const cand = principalDirection(
-        w.map(s => s.x), w.map(s => s.y), w.map(s => s.z), dirRef.current
-      );
-      if (cand && cand.variance >= ORIENT_MIN_VAR) {
-        const drift = angleBetween(cand.dir, dirRef.current);
-        if (drift < ORIENT_SWITCH_DEG) {
-          // Normal drift — follow it, no reset.
-          dirRef.current = cand.dir;
-          proc.direction = cand.dir;
-          ori.pending = null;
-        } else {
-          // Large jump — candidate remount. Require it to hold before snapping.
-          const samePending = ori.pending && angleBetween(cand.dir, ori.pending) < ORIENT_SWITCH_DEG / 2;
-          if (samePending && now - ori.pendingSince >= ORIENT_SWITCH_MS) {
-            dirRef.current = cand.dir;
-            proc.direction = cand.dir;
-            ori.pending = null;
-            // Reset stroke detection so the handoff jostle isn't a stroke.
-            const r = (accelValues.x ?? 0) * cand.dir.x
-              + (accelValues.y ?? 0) * cand.dir.y
-              + (accelValues.z ?? 0) * cand.dir.z;
-            proc.filteredAccel = r;
-            proc.strokeDetect = r;
-            proc.prevStrokeDetect = r;
-            proc.buffer = [];
-            proc.lastBoundaryTime = now;
-            calibSentRef.current = false; // re-send direction to a linked coach
-          } else if (!samePending) {
-            ori.pending = cand.dir;
-            ori.pendingSince = now;
-          }
-        }
-      }
+    // Accumulate the piece free-speed average that the big screen reads, and
+    // re-send the direction to a linked coach after a remount snap (the engine
+    // flags it on proc.remounted).
+    if (stroke && stroke.freeSec != null) {
+      pieceFreeSpeedRef.current.sum += stroke.freeSec;
+      pieceFreeSpeedRef.current.count++;
     }
-
-    const d = dirRef.current;
-    const raw = (accelValues.x ?? 0) * d.x + (accelValues.y ?? 0) * d.y + (accelValues.z ?? 0) * d.z;
-
-    // Light EMA for noise reduction
-    proc.filteredAccel += NOISE_ALPHA * (raw - proc.filteredAccel);
-
-    // Heavy EMA for stroke boundary detection
-    proc.prevStrokeDetect = proc.strokeDetect;
-    proc.strokeDetect += STROKE_DETECT_ALPHA * (raw - proc.strokeDetect);
-
-    proc.buffer.push({ time: now, accel: proc.filteredAccel });
-
-    // Detect full reach: positive → negative zero crossing of heavily filtered signal.
-    // Full reach is when the rower reaches maximum forward extension — the boat
-    // stops gaining "free speed" from the rower decelerating at front stops and
-    // begins to decelerate under drag alone until the catch (blade entry).
-    if (proc.prevStrokeDetect >= 0 && proc.strokeDetect < 0) {
-      const elapsed = now - proc.lastBoundaryTime;
-
-      if (elapsed >= MIN_STROKE_MS && elapsed <= MAX_STROKE_MS && proc.lastBoundaryTime > 0) {
-        const strokeSamples = proc.buffer.filter(
-          s => s.time >= proc.lastBoundaryTime && s.time <= now
-        );
-
-        // Try GPS-anchored processing first, fall back to relative
-        let curve = null;
-        const gps = gpsRef.current.speeds;
-        if (gps && gps.length >= 1) {
-          curve = processStrokeWithGPS(strokeSamples, gps);
-          if (curve) proc.hasGPS = true;
-        }
-        if (!curve) {
-          curve = processStroke(strokeSamples);
-          proc.hasGPS = false;
-        }
-
-        if (curve) {
-          // Stroke rate is a cadence measurement — track every detected stroke,
-          // independent of the GPS rowing gate below. Gating it on the speed
-          // band would average the rate across strokes the gate skipped (e.g.
-          // a pace sitting on the band edge, where the windowed split flickers
-          // in and out), diluting the rate well below the real cadence. Reset
-          // the window after a gap longer than a stroke so a genuine pause
-          // never gets averaged in as one slow stroke.
-          if (proc.boundaryTimes.length &&
-              now - proc.boundaryTimes[proc.boundaryTimes.length - 1] > MAX_STROKE_MS) {
-            proc.boundaryTimes = [];
-          }
-          proc.boundaryTimes.push(now);
-          if (proc.boundaryTimes.length > 10) proc.boundaryTimes.shift();
-          if (proc.boundaryTimes.length >= 2) {
-            const ct = proc.boundaryTimes;
-            proc.strokeRate = Math.round(60000 / ((ct[ct.length - 1] - ct[0]) / (ct.length - 1)));
-          }
-
-          // Split comes from GPS (accurate absolute speed), not the IMU curve
-          // mean (good for shape, drifty for magnitude). Smoothed over a window.
-          const gpsSpeed = proc.hasGPS
-            ? windowedGpsSpeed(gps, now, Math.max(elapsed, SPLIT_WINDOW_MS))
-            : null;
-          // Activity gate. With GPS present, only record while the boat is
-          // actually rowing — a 500m split inside the band — pausing and
-          // auto-resuming otherwise. With no GPS at all (a relative-mode
-          // recording) there's no split to gate on: record on replay/fed data,
-          // but stay idle for live capture, where GPS is required.
-          const hasGpsData = gps && gps.length > 0;
-          const rowing = hasGpsData
-            ? (gpsSpeed != null && gpsSpeed >= MIN_ROW_SPEED && gpsSpeed <= MAX_ROW_SPEED)
-            : nowOverride != null;
-          if (rowing) {
-            const avgSpeed = curve.reduce((a, b) => a + b, 0) / curve.length;
-            // Stamp the cadence at this stroke so a later inspection of one
-            // stroke (or a range) reads out the rate there, not the session-end
-            // scalar. proc.strokeRate was just refreshed above.
-            proc.strokes.push({ time: now, curve, avgSpeed, gpsSpeed, spm: proc.strokeRate });
-            if (proc.strokes.length > MAX_STROKES) proc.strokes.shift();
-            proc.strokeCount++;
-            proc.lastStroke = curve;
-            proc.lastGpsSpeed = gpsSpeed;
-            proc.avgCurve = averageCurves(proc.strokes);
-          }
-        }
-      }
-
-      proc.lastBoundaryTime = now;
-      // Trim buffer to last 5 seconds
-      const cutoff = now - 5000;
-      proc.buffer = proc.buffer.filter(s => s.time > cutoff);
+    if (proc.remounted) {
+      proc.remounted = false;
+      calibSentRef.current = false;
     }
   });
 
   // --- Coach watch lifecycle (coach side) ---
   // A fresh processing pipeline that consumes the rower's streamed samples
-  // instead of local sensors. Mirrors startCapture's proc init.
-  const makeProc = (startTime) => ({
-    filteredAccel: 0,
-    strokeDetect: 0,
-    prevStrokeDetect: 0,
-    buffer: [],
-    lastBoundaryTime: 0,
-    boundaryTimes: [],
-    strokes: [],
-    strokeCount: 0,
-    strokeRate: 0,
-    lastStroke: null,
-    lastGpsSpeed: null,
-    avgCurve: null,
-    hasGPS: false,
-    lastSampleTime: 0,
-    direction: null,
-    calibration: { startTime, samples: { x: [], y: [], z: [] }, done: false },
-    orient: { window: [], lastEval: 0, pending: null, pendingSince: 0 },
-  });
-
+  // instead of local sensors (makeProc lives in utils/strokePipeline).
   const startWatch = () => {
     // startTime null → set from the first received motion sample, so coach-side
     // calibration spans the right window if the rower wasn't calibrated yet.
     procRef.current = makeProc(null);
-    dirRef.current = { x: 0, y: 1, z: 0 };
     orientationRef.current = { beta: 0, gamma: 0 };
     gpsRef.current.speeds = [];
+    recvRef.current = { motion: 0, gps: 0, orientation: 0 };
     recordingRef.current = {
       version: 1,
       startedAt: new Date().toISOString(),
@@ -707,6 +335,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
       setLastStroke(proc.lastStroke);
       setAvgCurve(proc.avgCurve);
       setHasGPSAnchoring(proc.hasGPS);
+      publishAvgFreeSpeed();
       setStrokes([...proc.strokes]);
       setSelection(null);
       setSelectedIndex(null);
@@ -725,6 +354,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
       setStrokeRate(proc.strokeRate);
       setStrokeCount(proc.strokeCount);
       setHasGPSAnchoring(proc.hasGPS);
+      publishAvgFreeSpeed();
     }
     setSelection(null);
     setSelectedIndex(null);
@@ -744,6 +374,13 @@ function LiveCapture({ onSaveCurve, onBack }) {
   // Coach consumes the stream; rower resends capture state + calibration to a
   // freshly-connected coach so it can catch up mid-session.
   const handlePeerData = (msg) => {
+    // Either side introduces itself by name on connect (see handlePeerOpen) so
+    // the link readout can show who's on the other end; a coach also files the
+    // name into the roster. Handle it regardless of role; the rest is coach-only.
+    if (msg.type === 'hello') {
+      setLinkedPeerName(msg.name || '');
+      return;
+    }
     if (linkRole !== 'coach') return;
     const proc = procRef.current;
     switch (msg.type) {
@@ -753,13 +390,13 @@ function LiveCapture({ onSaveCurve, onBack }) {
         break;
       case 'calib':
         if (proc && msg.dir) {
-          dirRef.current = msg.dir;
           proc.direction = msg.dir;
           proc.calibration.done = true;
         }
         break;
       case 'motion':
         if (proc && Array.isArray(msg.samples)) {
+          recvRef.current.motion += msg.samples.length;
           for (const s of msg.samples) {
             if (proc.calibration.startTime == null) proc.calibration.startTime = s.t;
             const fakeEvent = {
@@ -771,10 +408,22 @@ function LiveCapture({ onSaveCurve, onBack }) {
             // handleMotion records into recordingRef itself (with t = s.t).
             handleMotion.current(fakeEvent, s.t);
           }
+          // Track the rower↔coach clock offset for video sync: the latest sample
+          // (rower time s.t) just arrived at coach wall-time `now`, ~half a
+          // round-trip after it was generated. EMA-smoothed against jitter.
+          const last = msg.samples[msg.samples.length - 1];
+          if (last && last.t != null) {
+            const transit = (lastPingRef.current ?? 0) / 2;
+            const offset = (performance.now() - transit) - last.t;
+            rowerToCoachRef.current = rowerToCoachRef.current == null
+              ? offset
+              : rowerToCoachRef.current + 0.2 * (offset - rowerToCoachRef.current);
+          }
         }
         break;
       case 'orientation':
         if (Array.isArray(msg.samples)) {
+          recvRef.current.orientation += msg.samples.length;
           const rec = recordingRef.current;
           for (const s of msg.samples) {
             if (s.beta != null) orientationRef.current = { beta: s.beta, gamma: s.gamma };
@@ -784,6 +433,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
         break;
       case 'gps':
         if (Array.isArray(msg.samples)) {
+          recvRef.current.gps += msg.samples.length;
           const rec = recordingRef.current;
           for (const s of msg.samples) {
             accumulateDistance(s.t, s.speed);
@@ -803,7 +453,10 @@ function LiveCapture({ onSaveCurve, onBack }) {
   };
 
   const handlePeerOpen = (conn) => {
-    // Rower: catch a coach up if it joins mid-session.
+    // Introduce ourselves by name (both sides) so the other end can show who it's
+    // connected to; for a coach this also feeds the roster. A rower then catches a
+    // mid-session coach up on capture + calibration.
+    try { conn.send({ type: 'hello', name: identityNameRef.current || '' }); } catch { /* ignore */ }
     if (linkRole !== 'rower' || !isCapturing) return;
     try {
       conn.send({ type: 'capture', active: true });
@@ -820,15 +473,37 @@ function LiveCapture({ onSaveCurve, onBack }) {
     onData: handlePeerData,
     onOpen: handlePeerOpen,
     onJoin: () => setLinkRole('coach'),
+    onClose: () => setLinkedPeerName(''),
+    fixedId: identity.id,
+    getPresence: () => ({ name: identityNameRef.current, busy: isCapturingRef.current }),
   });
   // Stable references (useCallback in the hook) — safe to use in effect deps.
   const { isOpen: linkIsOpen, sendData: linkSendData, sendBatch: linkSendBatch } = link;
 
+  // Mirror the measured round-trip into a ref so the (unsubscribed) peer-data
+  // handler can apply a transit correction to the video clock offset.
+  lastPingRef.current = link.lastPing;
+
+  // Rower: enable the coach link automatically so the phone is online and a coach
+  // can connect without anyone tapping "Enable coach link" first. Coach mode
+  // stays manual (tap to enable, then pick a rower). initPeer is idempotent.
+  const { initPeer: linkInitPeer, hasPeer: linkHasPeer } = link;
+  const autoEnabledRef = useRef(false);
+  useEffect(() => {
+    if (linkRole === 'rower' && !linkHasPeer && !autoEnabledRef.current) {
+      autoEnabledRef.current = true;
+      linkInitPeer();
+    }
+  }, [linkRole, linkHasPeer, linkInitPeer]);
+
   // Attach / detach the devicemotion listener (rower only — coach never uses
   // its own sensors; it feeds the received stream into handleMotion directly).
+  // During a desk replay we drive handleMotion from the recording, so ignore the
+  // device's own (stationary) sensor stream — otherwise real samples interleave
+  // with the replayed ones and corrupt calibration / stroke detection.
   useEffect(() => {
     if (!isCapturing) return;
-    const handler = (e) => handleMotion.current(e);
+    const handler = (e) => { if (replayRef.current) return; handleMotion.current(e); };
     window.addEventListener('devicemotion', handler);
     return () => window.removeEventListener('devicemotion', handler);
   }, [isCapturing]);
@@ -837,6 +512,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
   useEffect(() => {
     if (!isCapturing) return;
     const handler = (e) => {
+      if (replayRef.current) return; // replay supplies its own orientation
       if (e.beta != null) {
         const t = performance.now();
         orientationRef.current = { beta: e.beta, gamma: e.gamma };
@@ -862,6 +538,179 @@ function LiveCapture({ onSaveCurve, onBack }) {
     return () => wakeLockRelease();
   }, [linkRole, wakeLockRequest, wakeLockRelease]);
 
+  // Coach: once a data channel opens, remember (or refresh) that rower in the
+  // roster. Re-runs when the rower's advertised name arrives so the name sticks.
+  useEffect(() => {
+    if (linkRole !== 'coach' || !link.connectedPeerId) return;
+    setRoster(pairStore.saveRower({ id: link.connectedPeerId, name: linkedPeerName }));
+  }, [linkRole, link.connectedPeerId, linkedPeerName]);
+
+  // Coach: while idle (link enabled but not yet watching anyone), sweep the saved
+  // roster every few seconds to light up who's currently online. Probes run
+  // sequentially to stay gentle on the public broker.
+  const { probe: linkProbe } = link;
+  useEffect(() => {
+    if (linkRole !== 'coach' || !link.hasPeer || link.peerStatus === 'connected') return;
+    let cancelled = false;
+    let timer;
+    // Probe the whole roster in parallel each round (each updates its own dot as
+    // it resolves), then schedule the next round only once they've all settled —
+    // so offline timeouts never stack up into overlapping sweeps.
+    const sweep = async () => {
+      await Promise.all(pairStore.getRoster().map(async (r) => {
+        const res = await linkProbe(r.id);
+        if (!cancelled) setPresence((prev) => ({ ...prev, [r.id]: res }));
+      }));
+      if (!cancelled) timer = setTimeout(sweep, 4000);
+    };
+    sweep();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [linkRole, link.hasPeer, link.peerStatus, linkProbe]);
+
+  // Coach: dial a saved rower from the roster. Assumes the link is enabled
+  // (the roster only renders once our peer is online).
+  const connectToRower = (id) => {
+    link.setRemoteShortCode(id);
+    link.connectToRemote(id);
+  };
+
+  const handleRelabelRower = (r) => {
+    const next = window.prompt('Label for this rower', pairStore.displayName(r));
+    if (next == null) return;
+    setRoster(pairStore.relabelRower(r.id, next.trim()));
+  };
+
+  const handleRemoveRower = (r) => {
+    if (!window.confirm(`Forget ${pairStore.displayName(r)}?`)) return;
+    setRoster(pairStore.removeRower(r.id));
+  };
+
+  const handleNameChange = (v) => {
+    setLinkName(v);
+    pairStore.setName(v);
+  };
+
+  // Remember the rower/coach choice so the link opens in the same role next time.
+  const chooseRole = (role) => {
+    setLinkRole(role);
+    pairStore.setRole(role);
+  };
+
+  // Bind the live camera stream to the preview <video> element.
+  useEffect(() => {
+    const el = previewVideoRef.current;
+    if (el && videoRecorder.stream) {
+      el.srcObject = videoRecorder.stream;
+      el.play?.().catch(() => {});
+    }
+  }, [videoRecorder.stream]);
+
+  // --- Coach video recording ---
+  // Arm the camera and switch straight into the landscape full-screen viewfinder
+  // (see the camera overlay below + its fullscreen effect). Enabling the camera
+  // is async, but we flip `videoArmed` first — without awaiting — so the overlay
+  // mounts and requests fullscreen while the tap's activation is still live.
+  const armVideo = () => {
+    setVideoBundle(null);
+    setVideoArmed(true);
+    videoRecorder.enable().then((s) => { if (!s) setVideoArmed(false); });
+  };
+
+  // Leave the viewfinder: turn the camera off and drop out of full screen (the
+  // fullscreen effect's cleanup runs when videoArmed flips false).
+  const closeCamera = () => {
+    videoRecorder.disable();
+    setVideoArmed(false);
+  };
+
+  // Enter landscape full screen while the viewfinder is open; restore on exit.
+  // Best-effort — fullscreen/orientation-lock aren't on every browser (notably
+  // iOS), but the overlay is a fixed full-window layer regardless, so it still
+  // fills the screen.
+  useEffect(() => {
+    if (!videoArmed) return;
+    const el = cameraFsRef.current;
+    if (!el) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        if (el.requestFullscreen) await el.requestFullscreen();
+        else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+      } catch { /* ignore */ }
+      if (!cancelled) {
+        try { await window.screen?.orientation?.lock?.('landscape'); } catch { /* ignore */ }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      try { window.screen?.orientation?.unlock?.(); } catch { /* ignore */ }
+      if (document.fullscreenElement || document.webkitFullscreenElement) {
+        try { (document.exitFullscreen || document.webkitExitFullscreen)?.call(document); } catch { /* ignore */ }
+      }
+    };
+  }, [videoArmed]);
+
+  const startVideo = async () => {
+    const anchor = await videoRecorder.start();
+    if (!anchor) return;
+    videoAnchorRef.current = { ...anchor, rowerToCoachOffset: rowerToCoachRef.current ?? 0 };
+    setVideoBundle(null);
+  };
+
+  // Stop recording and package the footage with the strokes received so far into
+  // a downloadable/analyzable ZIP bundle.
+  const stopVideo = async () => {
+    setSavingBundle(true);
+    try {
+      const blob = await videoRecorder.stop();
+      const rec = recordingRef.current;
+      if (!blob || !rec) { setSavingBundle(false); return; }
+      const anchor = videoAnchorRef.current || {};
+      // Lock in the best clock offset we have at stop time.
+      anchor.rowerToCoachOffset = rowerToCoachRef.current ?? anchor.rowerToCoachOffset ?? 0;
+      const meta = {
+        ...rec,
+        video: {
+          startCoachPerf: anchor.startCoachPerf ?? 0,
+          rowerToCoachOffset: anchor.rowerToCoachOffset,
+          mime: anchor.mime || blob.type,
+          fps: anchor.fps || 30,
+        },
+      };
+      setVideoBundle({ blob, meta });
+    } finally {
+      setSavingBundle(false);
+      // Drop out of the landscape viewfinder so the share/analyze actions show.
+      closeCamera();
+    }
+  };
+
+  // Hand the in-memory bundle to the analyzer view without a download round-trip.
+  const openInAnalyzer = async () => {
+    if (!videoBundle) return;
+    try {
+      const zip = await packBundle(videoBundle.meta, videoBundle.blob);
+      await videoStore.putHandoff(zip, videoBundle.meta);
+      window.location.hash = '#analyze';
+    } catch (e) {
+      alert('Could not open analyzer: ' + (e?.message ?? e));
+    }
+  };
+
+  const downloadBundle = async () => {
+    if (!videoBundle) return;
+    const zip = await packBundle(videoBundle.meta, videoBundle.blob);
+    const url = URL.createObjectURL(zip);
+    const stamp = (videoBundle.meta.startedAt || new Date().toISOString()).replace(/[:.]/g, '-');
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `free-speed-${stamp}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   // Periodic UI refresh during capture or while watching a coach stream
   // (avoids 60 Hz React renders)
   useEffect(() => {
@@ -878,6 +727,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
       setHasGPSAnchoring(proc.hasGPS);
       setPieceDistance(distanceRef.current.piece);
       setSessionDistance(distanceRef.current.session);
+      publishAvgFreeSpeed();
 
       // Boat rowing? Use the latest processed sample time (works for both the
       // rower's clock and a coach's stream of rower-stamped samples) so the
@@ -896,6 +746,16 @@ function LiveCapture({ onSaveCurve, onBack }) {
       } else if (!proc.calibration.done) {
         setCalibrationStatus('calibrating');
       }
+
+      // Coach diagnostic: what's actually arriving vs. being detected.
+      if (isWatching) {
+        const r = recvRef.current;
+        const gate = proc.hasGPS ? 'gps' : (gpsRef.current.speeds.length ? 'gps(stale)' : 'no-gps');
+        setCoachDiag(
+          `rx ${r.motion} motion · ${r.gps} gps · calib ${proc.calibration.done ? 'yes' : 'no'} · ` +
+          `${gpsRef.current.speeds.length} gps-buf · ${gate} · ${proc.strokes.length} strokes`
+        );
+      }
     }, UI_UPDATE_MS);
     return () => clearInterval(id);
   }, [isCapturing, isWatching, linkRole, linkIsOpen, linkSendData]);
@@ -905,6 +765,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
   useEffect(() => () => {
     if (sendIntervalRef.current != null) clearInterval(sendIntervalRef.current);
     if (persistIntervalRef.current != null) clearInterval(persistIntervalRef.current);
+    if (replayRef.current) replayRef.current.cancel();
   }, []);
 
   // On mount, check IndexedDB for a session that didn't end cleanly and offer
@@ -935,7 +796,6 @@ function LiveCapture({ onSaveCurve, onBack }) {
 
   const startCapture = async () => {
     procRef.current = makeProc(performance.now());
-    dirRef.current = { x: 0, y: 1, z: 0 };
     recordingRef.current = {
       version: 1,
       startedAt: new Date().toISOString(),
@@ -1022,6 +882,15 @@ function LiveCapture({ onSaveCurve, onBack }) {
   };
 
   const stopCapture = () => {
+    // End an in-flight real-time replay: stop the loop and restore the source
+    // recording so a follow-up download re-exports it. The teardown below is all
+    // null-guarded, so it's safe even though a replay never set up GPS/streaming.
+    if (replayRef.current) {
+      replayRef.current.cancel();
+      recordingRef.current = replayRef.current.recording;
+      replayRef.current = null;
+      setLiveReplayActive(false);
+    }
     setIsCapturing(false);
     // Copy final state from processing refs
     const proc = procRef.current;
@@ -1031,6 +900,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
       setLastStroke(proc.lastStroke);
       setAvgCurve(proc.avgCurve);
       setHasGPSAnchoring(proc.hasGPS);
+      publishAvgFreeSpeed();
       setStrokes([...proc.strokes]);
       setSelection(null);
       setSelectedIndex(null);
@@ -1086,7 +956,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const [navHint, setNavHint] = useState(false);
   const navHintTimerRef = useRef(null);
   useEffect(() => {
-    if (!isCapturing) return;
+    if (!isCapturing || replayRef.current) return; // no exit trap during a desk replay
     const onBeforeUnload = (e) => { e.preventDefault(); e.returnValue = ''; };
     window.addEventListener('beforeunload', onBeforeUnload);
 
@@ -1148,9 +1018,40 @@ function LiveCapture({ onSaveCurve, onBack }) {
     URL.revokeObjectURL(url);
   };
 
+  // buildReplayEvents lives in utils/strokePipeline (shared with the analyzer).
+
+  // Feed one recorded event into the same refs/handlers a live capture uses.
+  // Motion events drive handleMotion with the recorded timestamp (nowOverride).
+  // During a *real-time* replay (replayRef set), also re-stream the events to a
+  // connected coach so the coach view works from a desk replay — handleMotion's
+  // own send-push is skipped under replay (nowOverride set, recordingRef null),
+  // so we buffer here. The instant fast-forward (replayRecording) leaves
+  // replayRef null and never streams.
+  const applyReplayEvent = (ev) => {
+    const streaming = !!replayRef.current;
+    if (ev.k === 'o') {
+      if (ev.d.beta != null) orientationRef.current = { beta: ev.d.beta, gamma: ev.d.gamma };
+      if (streaming) sendBufferRef.current.orientation.push(ev.d);
+    } else if (ev.k === 'g') {
+      accumulateDistance(ev.t, ev.d.speed);
+      gpsRef.current.speeds.push({ time: ev.t, speed: ev.d.speed });
+      const cutoff = ev.t - 30000;
+      gpsRef.current.speeds = gpsRef.current.speeds.filter(s => s.time > cutoff);
+      if (streaming) sendBufferRef.current.gps.push(ev.d);
+    } else {
+      const fakeEvent = {
+        acceleration: ev.d.ax != null ? { x: ev.d.ax, y: ev.d.ay, z: ev.d.az } : null,
+        accelerationIncludingGravity: ev.d.axg != null
+          ? { x: ev.d.axg, y: ev.d.ayg, z: ev.d.azg }
+          : null,
+      };
+      handleMotion.current(fakeEvent, ev.t);
+      if (streaming) sendBufferRef.current.motion.push(ev.d);
+    }
+  };
+
   const replayRecording = (recording) => {
     procRef.current = makeProc(recording.motion[0]?.t ?? 0);
-    dirRef.current = { x: 0, y: 1, z: 0 };
     gpsRef.current.speeds = [];
     orientationRef.current = { beta: 0, gamma: 0 };
     resetDistance();
@@ -1158,30 +1059,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     // Disable live recording so the replay doesn't double-record into the source data
     recordingRef.current = null;
 
-    const events = [];
-    for (const m of recording.motion || []) events.push({ k: 'm', t: m.t, d: m });
-    for (const o of recording.orientation || []) events.push({ k: 'o', t: o.t, d: o });
-    for (const g of recording.gps || []) events.push({ k: 'g', t: g.t, d: g });
-    events.sort((a, b) => a.t - b.t);
-
-    for (const ev of events) {
-      if (ev.k === 'o') {
-        if (ev.d.beta != null) orientationRef.current = { beta: ev.d.beta, gamma: ev.d.gamma };
-      } else if (ev.k === 'g') {
-        accumulateDistance(ev.t, ev.d.speed);
-        gpsRef.current.speeds.push({ time: ev.t, speed: ev.d.speed });
-        const cutoff = ev.t - 30000;
-        gpsRef.current.speeds = gpsRef.current.speeds.filter(s => s.time > cutoff);
-      } else {
-        const fakeEvent = {
-          acceleration: ev.d.ax != null ? { x: ev.d.ax, y: ev.d.ay, z: ev.d.az } : null,
-          accelerationIncludingGravity: ev.d.axg != null
-            ? { x: ev.d.axg, y: ev.d.ayg, z: ev.d.azg }
-            : null,
-        };
-        handleMotion.current(fakeEvent, ev.t);
-      }
-    }
+    for (const ev of buildReplayEvents(recording)) applyReplayEvent(ev);
 
     // Restore so a follow-up download re-exports the same recording
     recordingRef.current = recording;
@@ -1192,6 +1070,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     setLastStroke(proc.lastStroke);
     setAvgCurve(proc.avgCurve);
     setHasGPSAnchoring(proc.hasGPS);
+    publishAvgFreeSpeed();
     setCalibrationStatus(proc.direction ? 'detected' : 'idle');
     setStrokes([...proc.strokes]);
     setSelection(null);
@@ -1225,6 +1104,91 @@ function LiveCapture({ onSaveCurve, onBack }) {
       setIsReplaying(false);
     };
     reader.readAsText(file);
+  };
+
+  // Real-time replay: instead of fast-forwarding the whole recording at once
+  // (replayRecording), schedule its events at their recorded pace (× `speed`)
+  // so the live UI animates as it would on the water. Reuses the capture state
+  // path — setIsCapturing(true) makes the 250 ms UI-refresh interval poll proc,
+  // and Hold-to-Stop / the recording's end both finish via stopCapture.
+  const startLiveReplay = (recording, speed, range) => {
+    if (!recording) return;
+    let events = buildReplayEvents(recording);
+    if (events.length === 0) {
+      alert('Recording has no samples to replay');
+      return;
+    }
+
+    // Replay only the selected stroke-time range, with a short lead-in so
+    // orientation calibration and the stroke-detection EMA warm up before the
+    // selected strokes arrive (otherwise the range's first ~3 s is eaten by it).
+    if (range) {
+      const REPLAY_LEAD_MS = 6000;
+      events = events.filter(e => e.t >= range.min - REPLAY_LEAD_MS && e.t <= range.max);
+      if (events.length === 0) {
+        alert('No samples in the selected range');
+        return;
+      }
+    }
+
+    procRef.current = makeProc(events[0].t);
+    gpsRef.current.speeds = [];
+    orientationRef.current = { beta: 0, gamma: 0 };
+    resetDistance();
+    recordingRef.current = null; // replay drives the pipeline; don't re-record
+
+    setStrokeRate(0);
+    setStrokeCount(0);
+    setLastStroke(null);
+    setAvgCurve(null);
+    setLiveSplitSpeed(null);
+    setCalibrationStatus('calibrating');
+    setIsActive(false);
+    setHasGPSAnchoring(false);
+    setHasRecording(false);
+    setStrokes([]);
+    setSelection(null);
+    setSelectedIndex(null);
+    setGpsStatus(recording.gps && recording.gps.length ? 'active' : 'unavailable');
+    setLiveReplayActive(true);
+    setIsCapturing(true);
+
+    // Stream the replay to a connected coach, exactly as a live capture does, so
+    // the coach view (and the new video pairing) can be exercised from a desk.
+    // No-ops when no coach is connected; stopCapture tears the interval down and
+    // sends capture:false at the end.
+    sendBufferRef.current = { motion: [], orientation: [], gps: [] };
+    calibSentRef.current = false;
+    linkSendData({ type: 'capture', active: true });
+    if (sendIntervalRef.current != null) clearInterval(sendIntervalRef.current);
+    sendIntervalRef.current = setInterval(() => {
+      linkSendBatch(sendBufferRef.current);
+      sendBufferRef.current = { motion: [], orientation: [], gps: [] };
+    }, SEND_BATCH_MS);
+
+    const firstT = events[0].t;
+    const startWall = performance.now();
+    let idx = 0;
+    const state = { cancelled: false, rafId: null, recording };
+    const step = () => {
+      if (state.cancelled) return;
+      const playT = firstT + (performance.now() - startWall) * speed;
+      while (idx < events.length && events[idx].t <= playT) {
+        applyReplayEvent(events[idx]);
+        idx++;
+      }
+      if (idx < events.length) {
+        state.rafId = requestAnimationFrame(step);
+      } else {
+        stopCapture(); // snapshots proc → strokes, restores recording, clears replayRef
+      }
+    };
+    state.cancel = () => {
+      state.cancelled = true;
+      if (state.rafId != null) cancelAnimationFrame(state.rafId);
+    };
+    replayRef.current = state;
+    state.rafId = requestAnimationFrame(step);
   };
 
   const handleOpenInCalculator = () => {
@@ -1417,6 +1381,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     };
   }, [strokes, t0, selectedIndex, hasGPSAnchoring]);
 
+  const chrome = useChartChrome();
   const timeChartOptions = useMemo(() => ({
     responsive: true,
     maintainAspectRatio: false,
@@ -1432,6 +1397,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
       title: {
         display: true,
         text: 'Tap a stroke to inspect • drag the slider to zoom to a range',
+        color: chrome.title,
         font: { size: 13, weight: 'normal' },
       },
       tooltip: { enabled: false },
@@ -1439,6 +1405,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
     scales: {
       x: {
         type: 'linear',
+        grid: { color: chrome.grid },
         // The range slider zooms the chart: with 1000+ strokes the only way to
         // tap an individual one is to narrow the window first. Pad so a narrow
         // (even single-stroke) selection still has width and edge points show.
@@ -1450,20 +1417,23 @@ function LiveCapture({ onSaveCurve, onBack }) {
               return { min: lo - pad, max: hi + pad };
             })()
           : {}),
-        title: { display: true, text: 'Time (s)', font: { size: 11 } },
+        title: { display: true, text: 'Time (s)', color: chrome.title, font: { size: 11 } },
+        ticks: { color: chrome.tick },
       },
       y: {
+        grid: { color: chrome.grid },
         title: {
           display: true,
           text: hasGPSAnchoring ? 'Split / 500m' : 'Avg speed (relative)',
+          color: chrome.title,
           font: { size: 11 },
         },
         ticks: hasGPSAnchoring
-          ? { callback: (v) => formatSplit(v) }
-          : undefined,
+          ? { callback: (v) => formatSplit(v), color: chrome.tick }
+          : { color: chrome.tick },
       },
     },
-  }), [hasGPSAnchoring, selection, t0]);
+  }), [hasGPSAnchoring, selection, t0, chrome]);
 
   const resetSelection = () => {
     setSelection(null);
@@ -1505,6 +1475,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
         labels: {
           usePointStyle: true,
           pointStyle: 'line',
+          color: chrome.title,
           font: { size: 11 },
           generateLabels: (chart) => {
             const labels = ChartJS.defaults.plugins.legend.labels.generateLabels(chart);
@@ -1518,6 +1489,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
       title: {
         display: true,
         text: 'Stroke Speed Profile',
+        color: chrome.title,
         font: { size: 16, weight: 'bold' },
       },
       tooltip: { enabled: false },
@@ -1527,11 +1499,13 @@ function LiveCapture({ onSaveCurve, onBack }) {
         type: 'linear',
         min: 0,
         max: 1,
-        title: { display: true, text: periodMs ? 'Time (s)' : 'Stroke Phase', font: { size: 12 } },
+        grid: { color: chrome.grid },
+        title: { display: true, text: periodMs ? 'Time (s)' : 'Stroke Phase', color: chrome.title, font: { size: 12 } },
         ticks: {
           callback: periodMs
             ? (val) => (val * periodMs / 1000).toFixed(2)
             : (val) => Math.round(val * 100) + '%',
+          color: chrome.tick,
           maxTicksLimit: 6,
         },
       },
@@ -1539,25 +1513,32 @@ function LiveCapture({ onSaveCurve, onBack }) {
         // Auto-scaled per stroke (see yMin/yMax) so the curve fills the frame.
         min: yMin,
         max: yMax,
+        grid: { color: chrome.grid },
+        ticks: { color: chrome.tick },
         title: {
           display: true,
           text: hasGPSAnchoring ? 'Boat Speed (m/s)' : 'Boat Speed (relative)',
+          color: chrome.title,
           font: { size: 12 },
         },
       },
     },
    };
-  }, [hasGPSAnchoring, displayStrokeRate, yMin, yMax]);
+  }, [hasGPSAnchoring, displayStrokeRate, yMin, yMax, chrome]);
 
   // --- Render ---
 
   const isLive = isCapturing || isWatching;
   const gpsActive = gpsStatus === 'active' || hasGPSAnchoring;
 
+  // Rower-facing status stays calm: the link runs in the background while the
+  // rower is on the water, so anything short of "connected" is just "waiting" —
+  // signalling-server hiccups auto-retry (see usePeerLink) and aren't errors.
   const peerLabel = ({
     idle: 'Off',
-    initializing: 'Initializing…',
-    online: linkRole === 'coach' ? 'Ready — connect to the rower' : 'Online — waiting for a coach',
+    initializing: linkRole === 'coach' ? 'Starting…' : 'Not connected — waiting for a coach',
+    online: linkRole === 'coach' ? 'Ready — connect to the rower' : 'Not connected — waiting for a coach',
+    reconnecting: linkRole === 'coach' ? 'Reconnecting…' : 'Not connected — waiting for a coach',
     connecting: 'Connecting…',
     connected: 'Connected',
     error: `Error: ${link.peerError}`,
@@ -1568,7 +1549,17 @@ function LiveCapture({ onSaveCurve, onBack }) {
   const linkPanel = link.peerStatus === 'connected' ? (
     <div className="live-link live-link-connected">
       <span className="live-link-dot" />
-      <span>{linkRole === 'coach' ? 'Connected to rower' : 'Coach connected'}</span>
+      <span>
+        {linkedPeerName
+          ? `Connected to ${linkedPeerName}`
+          : (linkRole === 'coach' ? 'Connected to rower' : 'Coach connected')}
+      </span>
+      <button
+        className="btn btn-secondary btn-sm live-link-disconnect"
+        onClick={link.disconnect}
+      >
+        Disconnect
+      </button>
     </div>
   ) : (
     <div className="live-link">
@@ -1579,7 +1570,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
             name="live-role"
             value="rower"
             checked={linkRole === 'rower'}
-            onChange={() => setLinkRole('rower')}
+            onChange={() => chooseRole('rower')}
             disabled={isCapturing || isWatching}
           />
           This phone is in the boat (rower)
@@ -1590,49 +1581,126 @@ function LiveCapture({ onSaveCurve, onBack }) {
             name="live-role"
             value="coach"
             checked={linkRole === 'coach'}
-            onChange={() => setLinkRole('coach')}
+            onChange={() => chooseRole('coach')}
             disabled={isCapturing || isWatching}
           />
           Watch a rower's phone (coach)
         </label>
       </div>
 
-      <p className="oar-status">Coach link: {peerLabel}</p>
-      {!link.hasPeer && (
-        <button className="btn btn-secondary btn-sm" onClick={link.initPeer}>
-          Enable coach link
-        </button>
+      {linkRole === 'coach' && (
+        <div className="oar-row">
+          <input
+            type="text"
+            value={linkName}
+            onChange={(e) => handleNameChange(e.target.value)}
+            placeholder="Your name (coach)"
+            maxLength={32}
+          />
+        </div>
       )}
-      {link.hasPeer && (
+
+      {linkRole === 'coach' && link.hasPeer && roster.length > 0 && (
+        <div className="live-roster">
+          <div className="live-roster-title">Saved rowers</div>
+          {roster.map((r) => {
+            const p = presence[r.id];
+            const online = !!p?.online;
+            return (
+              <div key={r.id} className={`live-roster-row${online ? ' online' : ''}`}>
+                <span className={`live-roster-dot${online ? ' online' : ''}`} />
+                <span className="live-roster-name">
+                  {pairStore.displayName(r)}
+                  {online && p?.busy && <span className="live-roster-busy"> · rowing</span>}
+                </span>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => connectToRower(r.id)}
+                  disabled={!online || link.peerStatus === 'connecting'}
+                >
+                  {online ? 'Connect' : 'Offline'}
+                </button>
+                <button className="live-roster-edit" onClick={() => handleRelabelRower(r)} title="Rename">✎</button>
+                <button className="live-roster-edit" onClick={() => handleRemoveRower(r)} title="Forget">✕</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <p className="oar-status">Coach link: {peerLabel}</p>
+
+      {linkRole === 'rower' ? (
+        // The link is already running in the background; this just reveals the
+        // pairing details (QR / code) and the rower's name when a coach is
+        // setting up. Rowing doesn't require any of it.
         <>
-          <div className="oar-join-card">
-            <div className="oar-short-code">{link.shortCode || '…'}</div>
-            <div className="oar-join-hint">
-              {linkRole === 'rower'
-                ? 'Coach scans this QR or types this code to watch.'
-                : "Scan the rower's QR, or enter the rower's code below."}
-            </div>
-            {link.qrDataUrl && (
-              <img className="oar-qr" src={link.qrDataUrl} alt="Join QR code" />
-            )}
-          </div>
-          <div className="oar-row">
-            <input
-              type="text"
-              inputMode="numeric"
-              value={link.remoteShortCode}
-              onChange={(e) => link.setRemoteShortCode(e.target.value)}
-              placeholder="Other phone's code"
-              disabled={link.peerStatus === 'connected'}
-            />
-            <button
-              className="btn btn-secondary"
-              onClick={() => link.connectToRemote()}
-              disabled={!link.myPeerId || !link.remoteShortCode.trim() || link.peerStatus === 'connected'}
-            >
-              Connect
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={() => setShowLinkConfig((v) => !v)}
+            aria-expanded={showLinkConfig}
+          >
+            {showLinkConfig ? 'Hide coach link setup' : 'Configure coach link'}
+          </button>
+          {showLinkConfig && (
+            <>
+              <div className="oar-row">
+                <input
+                  type="text"
+                  value={linkName}
+                  onChange={(e) => handleNameChange(e.target.value)}
+                  placeholder="Your name (rower)"
+                  maxLength={32}
+                />
+              </div>
+              {link.hasPeer ? (
+                <div className="oar-join-card">
+                  <div className="oar-short-code">{link.shortCode || '…'}</div>
+                  <div className="oar-join-hint">Coach scans this QR or types this code to watch.</div>
+                  {link.qrDataUrl && <img className="oar-qr" src={link.qrDataUrl} alt="Join QR code" />}
+                </div>
+              ) : (
+                <p className="oar-status">Connecting to the link server…</p>
+              )}
+            </>
+          )}
+        </>
+      ) : (
+        <>
+          {!link.hasPeer && (
+            <button className="btn btn-secondary btn-sm" onClick={link.initPeer}>
+              Enable coach link
             </button>
-          </div>
+          )}
+          {link.hasPeer && (
+            <>
+              <div className="oar-join-card">
+                <div className="oar-short-code">{link.shortCode || '…'}</div>
+                <div className="oar-join-hint">Scan the rower's QR, or enter the rower's code below.</div>
+                {link.qrDataUrl && <img className="oar-qr" src={link.qrDataUrl} alt="Join QR code" />}
+              </div>
+              <div className="oar-row">
+                <input
+                  type="text"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={link.remoteShortCode}
+                  onChange={(e) => link.setRemoteShortCode(e.target.value)}
+                  placeholder="Other phone's code"
+                  disabled={link.peerStatus === 'connected'}
+                />
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => link.connectToRemote()}
+                  disabled={!link.myPeerId || !link.remoteShortCode.trim() || link.peerStatus === 'connected'}
+                >
+                  Connect
+                </button>
+              </div>
+            </>
+          )}
         </>
       )}
     </div>
@@ -1653,21 +1721,11 @@ function LiveCapture({ onSaveCurve, onBack }) {
   }
   const splitText = hasGPSAnchoring && displaySplitSpeed > 0 ? formatSplit(500 / displaySplitSpeed) : '—';
 
-  // Speed (m/s) available by matching the potential curve's shape at your
-  // current effort — see freeSpeedGain. Uses the same stroke the chart compares
-  // against potential (latest while live, the inspected one, else the average).
-  // Only meaningful when GPS-anchored.
-  const freeSpeed = hasGPSAnchoring ? freeSpeedGain(comparisonCurve, REF_SPEEDS) : null;
-  // The same gain expressed as time over 2 000 m: row 2k at your average speed
-  // vs. at the potential's (higher) average speed for the same effort. Positive
-  // = seconds you'd save by matching the optimal shape. Reads better on the
-  // water than m/s.
-  let freeSpeedSeconds = null;
-  if (freeSpeed != null && comparisonCurve && comparisonCurve.length) {
-    const vYou = comparisonCurve.reduce((a, b) => a + b, 0) / comparisonCurve.length;
-    const vPot = vYou + freeSpeed;
-    if (vYou > 0 && vPot > 0) freeSpeedSeconds = 2000 / vYou - 2000 / vPot;
-  }
+  // Free speed (s/2k) available by matching the potential curve's shape at your
+  // current effort — see freeSpeedSecondsFor / freeSpeedGain. Uses the same
+  // stroke the chart compares against potential (latest while live, the
+  // inspected one, else the average). Only meaningful when GPS-anchored.
+  const freeSpeedSeconds = hasGPSAnchoring ? freeSpeedSecondsFor(comparisonCurve) : null;
 
   const statsView = (
     <div className="live-stats">
@@ -1850,6 +1908,31 @@ function LiveCapture({ onSaveCurve, onBack }) {
           Open in Calculator
         </button>
       )}
+      {/* Real-time replay of a loaded/captured recording — drive the live UI
+          from a desk for testing. Replays the selected stroke range when one is
+          set (drag the slider above), otherwise the whole row. */}
+      {hasRecording && (
+        <div className="live-replay-controls">
+          <button
+            className="btn btn-secondary btn-large"
+            onClick={() => startLiveReplay(recordingRef.current, replaySpeed, selection)}
+          >
+            {selection ? '▶ Replay range live' : '▶ Replay live'}
+          </button>
+          <label className="live-replay-speed">
+            Speed
+            <select
+              value={replaySpeed}
+              onChange={(e) => setReplaySpeed(Number(e.target.value))}
+            >
+              <option value={1}>1×</option>
+              <option value={2}>2×</option>
+              <option value={4}>4×</option>
+              <option value={8}>8×</option>
+            </select>
+          </label>
+        </div>
+      )}
       {hasRecording && (
         <button className="btn btn-secondary btn-large" onClick={downloadRecording}>
           Download recording
@@ -1858,12 +1941,86 @@ function LiveCapture({ onSaveCurve, onBack }) {
     </>
   );
 
+  // Coach-side video recording: film the rower while watching their live data,
+  // then package the footage + strokes into a shareable, analyzable bundle. The
+  // viewfinder itself is a full-screen overlay (cameraOverlay, below); this
+  // inline block is just the entry button and the post-recording actions.
+  const videoView = linkRole === 'coach' && videoRecorder.supported && (
+    <div className="live-video">
+      {!videoArmed && !videoRecorder.isRecording && (
+        <button className="btn btn-secondary btn-sm" onClick={armVideo}>
+          🎥 Record video
+        </button>
+      )}
+      {videoRecorder.error && !videoArmed && <p className="oar-status">{videoRecorder.error}</p>}
+      {videoBundle && (
+        <div className="live-video-actions">
+          <span className="live-video-ready">Video ready ({Math.round(videoBundle.blob.size / 1e6)} MB)</span>
+          <button className="btn btn-primary btn-sm" onClick={openInAnalyzer}>
+            Open in Analyzer
+          </button>
+          <button className="btn btn-secondary btn-sm" onClick={downloadBundle}>
+            Download bundle (.zip)
+          </button>
+          <button className="btn btn-secondary btn-sm" onClick={armVideo}>
+            🎥 Record again
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
+  // Full-screen landscape viewfinder. The record/stop control sits on the right
+  // edge (camera-app shutter position) so it falls under the right thumb when the
+  // phone is held two-handed in landscape. Exit (✕) is top-left, out of the way.
+  const cameraOverlay = linkRole === 'coach' && videoRecorder.supported
+    && (videoArmed || videoRecorder.isRecording) && (
+    <div className="live-camera-fs" ref={cameraFsRef}>
+      <video ref={previewVideoRef} className="live-camera-video" muted playsInline />
+
+      {videoRecorder.isRecording
+        ? <span className="live-camera-rec">● REC</span>
+        : <span className="live-camera-hint">Frame the rower, then tap ● to record</span>}
+      {videoRecorder.error && <p className="live-camera-error">{videoRecorder.error}</p>}
+
+      <div className="live-camera-controls">
+        {!videoRecorder.isRecording ? (
+          <button
+            className="live-camera-shutter live-camera-shutter-rec"
+            onClick={startVideo}
+            aria-label="Start recording"
+            title="Start recording"
+          />
+        ) : (
+          <button
+            className="live-camera-shutter live-camera-shutter-stop"
+            onClick={stopVideo}
+            disabled={savingBundle}
+            aria-label="Stop recording"
+            title="Stop recording"
+          >
+            {savingBundle ? '…' : ''}
+          </button>
+        )}
+      </div>
+
+      {!videoRecorder.isRecording && (
+        <button className="live-camera-close" onClick={closeCamera} aria-label="Close camera" title="Close camera">
+          ✕
+        </button>
+      )}
+    </div>
+  );
+
   return (
+    <AppShell page="live" title="Live Stroke Capture">
     <div className="live-capture">
+      {cameraOverlay}
       {bigScreen && (
         <LiveBigScreen
           splitText={splitText}
           freeSpeedSeconds={freeSpeedSeconds}
+          avgFreeSpeedSeconds={avgFreeSpeedSeconds}
           strokeRate={displayStrokeRate}
           pieceDistance={pieceDistance}
           sessionDistance={sessionDistance}
@@ -1873,11 +2030,6 @@ function LiveCapture({ onSaveCurve, onBack }) {
           onClose={() => setBigScreen(false)}
         />
       )}
-      <div className="live-header">
-        <button className="btn btn-secondary btn-sm" onClick={onBack}>← Calculator</button>
-        <h2>Live Stroke Capture</h2>
-      </div>
-
       {linkPanel}
 
       {recoverable && !isLive && (
@@ -1898,6 +2050,12 @@ function LiveCapture({ onSaveCurve, onBack }) {
         </div>
       )}
 
+      {liveReplayActive && (
+        <div className="live-replay-banner" role="status">
+          ▶ Replaying recording at {replaySpeed}× — hold <strong>Stop</strong> to end.
+        </div>
+      )}
+
       {linkRole === 'coach' ? (
         <>
           <div className="live-guide">
@@ -1907,10 +2065,14 @@ function LiveCapture({ onSaveCurve, onBack }) {
                   : 'Connected. Waiting for the rower to start capturing…')
               : "Connect to the rower's phone above to watch their live stroke data."}
           </div>
+          {isWatching && coachDiag && (
+            <div className="live-coach-diag">{coachDiag}</div>
+          )}
           {statsView}
           {chartView}
           {timeChartView}
           {activityView}
+          {videoView}
           <div className="live-actions">
             {isWatching && (
               isPaused ? (
@@ -2030,6 +2192,7 @@ function LiveCapture({ onSaveCurve, onBack }) {
         </>
       )}
     </div>
+    </AppShell>
   );
 }
 

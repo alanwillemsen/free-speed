@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Line } from 'react-chartjs-2';
+import { resolveTheme } from '../hooks/useTheme';
 
 // Outdoor full-screen readout for the rower: just the split, the stroke rate,
 // and the stroke speed profile, sized to be legible at arm's length without
@@ -23,8 +24,11 @@ const THEMES = {
   },
 };
 
-function LiveBigScreen({ splitText, freeSpeedSeconds, strokeRate, pieceDistance, sessionDistance, onResetPiece, chartData, hasGPSAnchoring, onClose }) {
-  const [theme, setTheme] = useState('sun');
+function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strokeRate, pieceDistance, sessionDistance, onResetPiece, chartData, hasGPSAnchoring, onClose }) {
+  // Seed from the app theme (dark app → dark readout for night rows), then let
+  // the rower flip it with the on-screen toggle — at arm's length in changing
+  // light they may want the opposite of the app chrome.
+  const [theme, setTheme] = useState(() => (resolveTheme() === 'dark' ? 'dark' : 'sun'));
   // Locked orientation while full-screen. Defaults to landscape (the wide
   // readout layout); the rotate button toggles it. The CSS layout follows the
   // real orientation, so locking portrait re-flows the numbers above the graph.
@@ -163,6 +167,9 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, strokeRate, pieceDistance,
    };
   }, [c, hasGPSAnchoring, strokeRate]);
 
+  // Free speed as a signed seconds-per-2k string: "+1.2 s" / "−0.4 s".
+  const fmtFree = (s) => (s >= 0 ? '+' : '−') + Math.abs(s).toFixed(1) + ' s';
+
   return (
     <div
       ref={rootRef}
@@ -190,45 +197,69 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, strokeRate, pieceDistance,
         </button>
       </div>
 
-      <div className="bigscreen-metrics">
+      {/* Split (left) and SPM (right) span the full width up top — the two big
+          numbers the rower steers by. */}
+      <div className="bigscreen-toprow">
         <div className="bigscreen-metric">
           <div className="bigscreen-value bigscreen-split" style={{ color: c.accent }}>{splitText}</div>
           <div className="bigscreen-label" style={{ color: c.muted }}>/500m</div>
-          {freeSpeedSeconds != null && (
-            <div className="bigscreen-delta" style={{ color: freeSpeedSeconds > 0.5 ? c.warn : c.good }}>
-              {(freeSpeedSeconds >= 0 ? '+' : '−') + Math.abs(freeSpeedSeconds).toFixed(1) + ' s'}
-              {' '}
-              <span className="bigscreen-delta-cap" style={{ color: c.muted }}>free speed / 2k</span>
-            </div>
-          )}
         </div>
         <div className="bigscreen-metric">
           <div className="bigscreen-value bigscreen-spm">{strokeRate || '—'}</div>
           <div className="bigscreen-label" style={{ color: c.muted }}>spm</div>
-          <div
-            className="bigscreen-distance"
-            onPointerDown={beginPieceHold}
-            onPointerUp={cancelPieceHold}
-            onPointerLeave={cancelPieceHold}
-            onPointerCancel={cancelPieceHold}
-            onContextMenu={(e) => e.preventDefault()}
-            style={{ cursor: 'pointer', userSelect: 'none', touchAction: 'none' }}
-            title="Hold to reset the piece"
-          >
-            <div className="bigscreen-distance-piece" style={{ color: pieceFlash ? c.good : c.fg }}>
-              {Math.round(pieceDistance || 0).toLocaleString()} m
-              {' '}
-              <span className="bigscreen-delta-cap" style={{ color: c.muted }}>piece · hold to reset</span>
-            </div>
-            <div className="bigscreen-distance-total" style={{ color: c.muted }}>
-              {Math.round(sessionDistance || 0).toLocaleString()} m total
-            </div>
-          </div>
         </div>
       </div>
 
-      <div className="bigscreen-graph">
-        <Line data={bigData} options={bigOptions} />
+      <div className="bigscreen-body">
+        <div className="bigscreen-metrics">
+          {/* Free speed, with the piece average the same size beneath it. */}
+          <div className="bigscreen-metric">
+            <div
+              className="bigscreen-value bigscreen-freespeed"
+              style={{ color: freeSpeedSeconds == null ? c.muted : freeSpeedSeconds > 0.5 ? c.warn : c.good }}
+            >
+              {freeSpeedSeconds == null ? '—' : fmtFree(freeSpeedSeconds)}
+            </div>
+            <div className="bigscreen-label" style={{ color: c.muted }}>free speed / 2k</div>
+            {avgFreeSpeedSeconds != null && (
+              <div
+                className="bigscreen-value bigscreen-freespeed bigscreen-freespeed-avg"
+                style={{ color: avgFreeSpeedSeconds > 0.5 ? c.warn : c.good }}
+              >
+                {fmtFree(avgFreeSpeedSeconds)}
+                {' '}
+                <span className="bigscreen-delta-cap" style={{ color: c.muted }}>avg</span>
+              </div>
+            )}
+          </div>
+
+          {/* Distance — long-press to start a new piece (resets the free-speed avg). */}
+          <div className="bigscreen-metric">
+            <div
+              className="bigscreen-distance"
+              onPointerDown={beginPieceHold}
+              onPointerUp={cancelPieceHold}
+              onPointerLeave={cancelPieceHold}
+              onPointerCancel={cancelPieceHold}
+              onContextMenu={(e) => e.preventDefault()}
+              style={{ cursor: 'pointer', userSelect: 'none', touchAction: 'none' }}
+              title="Hold to reset the piece"
+            >
+              <div className="bigscreen-distance-piece" style={{ color: pieceFlash ? c.good : c.fg }}>
+                {Math.round(pieceDistance || 0).toLocaleString()} m
+                {' '}
+                <span className="bigscreen-delta-cap" style={{ color: c.muted }}>piece · hold to reset</span>
+              </div>
+              <div className="bigscreen-distance-total" style={{ color: c.muted }}>
+                {Math.round(sessionDistance || 0).toLocaleString()} m total
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="bigscreen-graph">
+          <Line data={bigData} options={bigOptions} />
+        </div>
       </div>
     </div>
   );

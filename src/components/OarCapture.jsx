@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
+import AppShell from './AppShell';
 import { usePeerLink } from '../hooks/usePeerLink';
 import { useWakeLock } from '../hooks/useWakeLock';
 import {
@@ -73,7 +74,7 @@ function downloadJSON(obj, filenameStem) {
   URL.revokeObjectURL(url);
 }
 
-function OarCapture({ onBack }) {
+function OarCapture() {
   // --- UI state ---
   const [role, setRole] = useState('rower'); // 'rower' or 'coach'
   const [sensorStatus, setSensorStatus] = useState('unknown'); // unknown | requesting | available | denied
@@ -547,12 +548,8 @@ function OarCapture({ onBack }) {
   })[link.peerStatus] ?? link.peerStatus;
 
   return (
+    <AppShell page="oar" title="Oar Capture">
     <div className="oar-capture">
-      <header className="oar-header">
-        <button className="btn btn-secondary" onClick={onBack}>← Back</button>
-        <h1>Oar Capture</h1>
-      </header>
-
       <section className="oar-section">
         <h2>Role</h2>
         <div className="oar-role-toggle">
@@ -721,6 +718,7 @@ function OarCapture({ onBack }) {
         </div>
       </section>
     </div>
+    </AppShell>
   );
 }
 
