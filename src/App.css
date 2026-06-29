@@ -540,106 +540,7 @@ body {
   position: relative;
 }
 
-/* Results Component */
-.results {
-  background: var(--surface);
-  border-radius: 12px;
-  padding: 2rem;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
-}
-
-.results h2 {
-  font-size: 1.6rem;
-  margin-bottom: 1.5rem;
-  color: var(--text);
-  font-weight: 700;
-}
-
-.results-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 1.5rem;
-  margin-bottom: 2rem;
-}
-
-.result-section {
-  padding: 1.5rem;
-  border-radius: 10px;
-  border: 2px solid;
-  background-color: var(--surface-2);
-}
-
-.result-section h3 {
-  font-size: 1.2rem;
-  margin-bottom: 1rem;
-  font-weight: 700;
-}
-
-.result-section.curve-a {
-  border-color: var(--success);
-  background: linear-gradient(135deg, var(--success-bg) 0%, var(--success-bg) 100%);
-}
-
-.result-section.curve-a h3 {
-  color: var(--success);
-}
-
-.result-section.curve-b-current {
-  border-color: var(--text-faint);
-  background: linear-gradient(135deg, var(--surface-2) 0%, var(--surface-2) 100%);
-}
-
-.result-section.curve-b-current h3 {
-  color: var(--text-muted);
-}
-
-.result-section.curve-b-norm {
-  border-color: var(--danger);
-  background: linear-gradient(135deg, var(--danger-bg) 0%, var(--danger-bg) 100%);
-}
-
-.result-section.curve-b-norm h3 {
-  color: var(--danger);
-}
-
-.result-section.prediction {
-  border-color: var(--warning);
-  background: linear-gradient(135deg, var(--warning-bg) 0%, var(--warning-bg) 100%);
-  grid-column: 1 / -1;
-}
-
-.result-section.prediction h3 {
-  color: var(--warning);
-}
-
-.metric {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  margin-bottom: 0.75rem;
-  padding: 0.6rem;
-  background-color: rgba(255, 255, 255, 0.6);
-  border-radius: 6px;
-}
-
-.metric.highlight {
-  background-color: rgba(255, 255, 255, 0.9);
-  font-weight: 700;
-  border: 1px solid rgba(0, 0, 0, 0.1);
-}
-
-.metric-label {
-  color: var(--text-muted);
-  font-size: 0.95rem;
-  font-weight: 500;
-}
-
-.metric-value {
-  color: var(--text);
-  font-weight: 700;
-  font-size: 1rem;
-}
-
+/* Time input (calculator "you now" race time) */
 .time-input {
   font-weight: 700;
   font-size: 1rem;
@@ -654,36 +555,6 @@ body {
 .time-input:focus {
   outline: none;
   border-color: var(--info);
-}
-
-.metric-value.penalty {
-  color: var(--danger);
-}
-
-.metric-value.bonus {
-  color: var(--success);
-}
-
-.metric-value.worse {
-  color: var(--danger);
-}
-
-.metric-value.better {
-  color: var(--success);
-}
-
-.diff-note {
-  font-size: 0.8rem;
-  color: var(--danger);
-  font-weight: 600;
-}
-
-.explanation {
-  font-size: 0.95rem;
-  color: var(--text-muted);
-  margin-bottom: 1rem;
-  line-height: 1.5;
-  font-style: italic;
 }
 
 /* Insights */
@@ -1410,9 +1281,101 @@ body {
   margin-top: 0.1rem;
 }
 
+/* Open the inspected/median stroke in the Efficiency Calculator in a new tab,
+   keeping the live session loaded here. Pinned to the top-left of the chart,
+   mirroring the full-screen button on the right; only shown while a stroke is
+   inspected (avgCurve present). */
+.live-calc-btn {
+  position: absolute;
+  top: 0.6rem;
+  left: 0.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.2rem;
+  height: 2.2rem;
+  border: none;
+  border-radius: 8px;
+  background: rgba(45, 55, 72, 0.85);
+  color: var(--on-accent);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  z-index: 2;
+}
+
+.live-calc-btn:hover {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
 .live-split-value {
   font-size: 1.5rem;
   font-variant-numeric: tabular-nums;
+}
+
+.live-free-value {
+  font-size: 1.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The "untapped" stat anchors a tap-to-reveal explainer (no hover tooltips,
+   which don't fire on mobile). */
+.live-free-stat {
+  position: relative;
+}
+
+.live-free-info-btn {
+  border: none;
+  background: none;
+  padding: 0 0 0 0.25rem;
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 0.8rem;
+  line-height: 1;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.live-free-info-btn:hover {
+  color: var(--text);
+}
+
+.live-free-info {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  width: max-content;
+  max-width: 16rem;
+  padding: 0.6rem 1.8rem 0.6rem 0.7rem;
+  background: var(--text);
+  color: var(--surface);
+  border-radius: 0.5rem;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  text-transform: none;
+  letter-spacing: normal;
+  text-align: left;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+}
+
+.live-free-info-close {
+  position: absolute;
+  top: 0.25rem;
+  right: 0.35rem;
+  border: none;
+  background: none;
+  padding: 0.1rem;
+  color: var(--surface);
+  opacity: 0.7;
+  font-size: 0.75rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.live-free-info-close:hover {
+  opacity: 1;
 }
 
 .live-chart-container {
@@ -1562,8 +1525,9 @@ body {
 .bigscreen-label {
   font-size: clamp(0.9rem, 3.5vmin, 2rem);
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
+  /* No uppercase transform: unit symbols must keep their case (m = metre,
+     M = mega; k = kilo, K = kelvin). Labels are authored in their true case. */
+  letter-spacing: 0.08em;
   margin-top: 0.4vh;
 }
 
@@ -1579,8 +1543,7 @@ body {
 
 .bigscreen-delta-cap {
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.06em;
 }
 
 /* Distance under the SPM: the resettable piece, then the session total. */
@@ -1757,6 +1720,41 @@ body {
 .live-time-chart-actions {
   display: flex;
   gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.live-untapped-panel {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.live-untapped-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  margin-bottom: 0.4rem;
+}
+
+.live-untapped-stat strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.live-untapped-hist-wrapper {
+  height: 120px;
+}
+
+.live-untapped-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-top: 0.4rem;
+  font-size: 0.8rem;
+  color: #10b981;
   flex-wrap: wrap;
 }
 
@@ -1953,12 +1951,6 @@ body {
 }
 
 /* Responsive Design */
-@media (max-width: 1200px) {
-  .results-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
 @media (max-width: 900px) {
   .left-nav {
     flex: 0 0 200px;
@@ -1990,10 +1982,6 @@ body {
 
   .chart-wrapper {
     height: 350px;
-  }
-
-  .results h2 {
-    font-size: 1.3rem;
   }
 }
 

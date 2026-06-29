@@ -117,6 +117,21 @@ export function normalizeCurve(speeds, targetAvg) {
 }
 
 /**
+ * Shift a curve vertically so its average matches a target, preserving shape.
+ *
+ * Unlike normalizeCurve (which multiplies, distorting the shape — high points
+ * move far more than low ones), this adds a constant offset. That keeps the
+ * stroke-to-stroke variations intact, which is what makes the graph editor feel
+ * direct: dragging one point moves that point and nudges the whole curve up or
+ * down by 1/n of the change, instead of rescaling every other point.
+ */
+export function offsetCurveToAverage(speeds, targetAvg) {
+  const currentAvg = calculateAverageVelocity(speeds);
+  const offset = targetAvg - currentAvg;
+  return speeds.map(v => v + offset);
+}
+
+/**
  * Scale a curve by a factor
  */
 export function scaleCurve(speeds, factor) {

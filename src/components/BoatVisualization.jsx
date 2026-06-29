@@ -65,7 +65,9 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
   const raceDistance = 2000;
 
   const distanceDifference = Math.abs(avgVelocityA * timeDifference);
-  const isCurveBFaster = timeDifference < 0;
+  // timeDifference = potential - now, so it's negative in the usual case: the
+  // smoother potential stroke finishes ahead of where you are now.
+  const isPotentialFaster = timeDifference < 0;
 
   const svgWidth = 800;
   const svgHeight = 180;
@@ -100,8 +102,9 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
   const winnerPosition = finishLineX; // bow tip at finish
   const loserPosition = finishLineX - (distanceDifference * scale);
 
-  const boatAPosition = isCurveBFaster ? loserPosition : winnerPosition;
-  const boatBPosition = isCurveBFaster ? winnerPosition : loserPosition;
+  // Boat A is "Your potential", Boat B is "You now": potential leads when faster.
+  const boatAPosition = isPotentialFaster ? winnerPosition : loserPosition;
+  const boatBPosition = isPotentialFaster ? loserPosition : winnerPosition;
   const absDifference = distanceDifference;
 
   const handleBlur = () => {
@@ -118,7 +121,9 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
     if (e.key === 'Enter') e.target.blur();
   };
 
-  const isWorse = timeDifference > 0;
+  // Colour the potential/difference green when there's real time to gain,
+  // red in the rare case your current stroke is already smoother than the reference.
+  const resultClass = absDifference < 0.1 ? '' : isPotentialFaster ? 'better' : 'worse';
 
   return (
     <div className="boat-visualization">
@@ -126,7 +131,7 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
 
       <div className="race-metrics">
         <div className="race-metric">
-          <span className="race-metric-label">Your potential finish time:</span>
+          <span className="race-metric-label">You now:</span>
           <input
             className="time-input"
             value={inputValue}
@@ -137,14 +142,14 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
           />
         </div>
         <div className="race-metric">
-          <span className="race-metric-label">You now:</span>
-          <span className={`race-metric-value ${isWorse ? 'worse' : absDifference < 0.1 ? '' : 'better'}`}>
+          <span className="race-metric-label">Your potential finish time:</span>
+          <span className={`race-metric-value ${resultClass}`}>
             {formatTime(estimatedFinishTime)}
           </span>
         </div>
         <div className="race-metric">
           <span className="race-metric-label">Time difference:</span>
-          <span className={`race-metric-value ${isWorse ? 'worse' : absDifference < 0.1 ? '' : 'better'}`}>
+          <span className={`race-metric-value ${resultClass}`}>
             {absDifference < 0.1 ? '0.0s' : formatTimeDiff(timeDifference)}
           </span>
         </div>
@@ -159,7 +164,7 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
       <p className="viz-description">
         {absDifference < 0.1
           ? 'Both velocity profiles require the same energy — boats finish together.'
-          : <>With the same total energy, your potential finishes {isCurveBFaster ? 'behind' : 'ahead'} by <span className="distance-diff">{absDifference.toFixed(1)}m</span>.</>
+          : <>With the same total energy, your potential finishes {isPotentialFaster ? 'ahead' : 'behind'} by <span className="distance-diff">{absDifference.toFixed(1)}m</span>.</>
         }
       </p>
 
@@ -269,7 +274,7 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
       </svg>
 
       {absDifference < 0.1 && <p className="viz-note">≈ Curves have similar efficiency profiles.</p>}
-      {absDifference >= 0.1 && isCurveBFaster && <p className="viz-note success">✓ You now are more efficient and would finish ahead!</p>}
+      {absDifference >= 0.1 && !isPotentialFaster && <p className="viz-note success">✓ You now are more efficient and would finish ahead!</p>}
     </div>
   );
 }

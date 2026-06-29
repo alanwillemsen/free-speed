@@ -220,7 +220,7 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
             >
               {freeSpeedSeconds == null ? '—' : fmtFree(freeSpeedSeconds)}
             </div>
-            <div className="bigscreen-label" style={{ color: c.muted }}>free speed / 2k</div>
+            <div className="bigscreen-label" style={{ color: c.muted }}>untapped / 2k</div>
             {avgFreeSpeedSeconds != null && (
               <div
                 className="bigscreen-value bigscreen-freespeed bigscreen-freespeed-avg"
@@ -251,7 +251,8 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
                 <span className="bigscreen-delta-cap" style={{ color: c.muted }}>piece · hold to reset</span>
               </div>
               <div className="bigscreen-distance-total" style={{ color: c.muted }}>
-                {Math.round(sessionDistance || 0).toLocaleString()} m total
+                {Math.round(sessionDistance || 0).toLocaleString()} m{' '}
+                <span className="bigscreen-delta-cap">total</span>
               </div>
             </div>
           </div>

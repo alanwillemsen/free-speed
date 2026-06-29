@@ -2,14 +2,16 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import {
   Chart as ChartJS,
   LinearScale,
+  CategoryScale,
   PointElement,
   LineElement,
+  BarElement,
   Title,
   Tooltip,
   Legend,
   Filler,
 } from 'chart.js';
-import { Line } from 'react-chartjs-2';
+import { Line, Bar } from 'react-chartjs-2';
 import LiveBigScreen from './LiveBigScreen';
 import { usePeerLink } from '../hooks/usePeerLink';
 import { useWakeLock } from '../hooks/useWakeLock';
@@ -21,6 +23,7 @@ import * as pairStore from '../utils/pairStore';
 import * as videoStore from '../utils/videoStore';
 import { packBundle } from '../utils/videoBundle';
 import { catchStartIndex, rollCurve } from '../utils/curves';
+import { encodeCurve } from './SavedCurves';
 import {
   NUM_POINTS, MIN_ROW_SPEED, MAX_ROW_SPEED, SPLIT_WINDOW_MS,
   REF_SPEEDS, REF_AVG, REF_ROLLED, PHASE_TIMES,
@@ -28,7 +31,7 @@ import {
   makeProc, feedSample, buildReplayEvents, subtractGravity,
 } from '../utils/strokePipeline';
 
-ChartJS.register(LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler);
+ChartJS.register(LinearScale, CategoryScale, PointElement, LineElement, BarElement, Title, Tooltip, Legend, Filler);
 
 // --- Constants (UI / networking; signal-processing constants and the stroke
 // engine live in utils/strokePipeline) ---
@@ -38,7 +41,7 @@ const PERSIST_FLUSH_MS = 2000;    // Flush new samples to IndexedDB this often (
 
 // --- Component ---
 
-function LiveCapture({ onSaveCurve }) {
+function LiveCapture() {
   const [isCapturing, setIsCapturing] = useState(false);
   const [sensorStatus, setSensorStatus] = useState('checking');
   // Outdoor full-screen readout (split + spm + speed profile). Capture keeps
@@ -101,9 +104,14 @@ function LiveCapture({ onSaveCurve }) {
   const [strokes, setStrokes] = useState([]);
   // Selection in stroke-time coordinates (same units as `time` above), or null = all.
   const [selection, setSelection] = useState(null);
-  // Index into `strokes` for showing a single stroke instead of the average.
-  // null = show average.
+  // Index into `strokes` for showing a single stroke instead of the median.
+  // null = show the range's median (typical) stroke.
   const [selectedIndex, setSelectedIndex] = useState(null);
+  // Selected histogram bin for the untapped-time distribution (review only).
+  // null = default to the bin holding the median.
+  const [selectedBin, setSelectedBin] = useState(null);
+  // Whether the tappable explainer for the "untapped" free-speed stat is open.
+  const [showFreeInfo, setShowFreeInfo] = useState(false);
 
   // Processing state lives in refs to avoid stale closures in the 60 Hz handler
   const procRef = useRef(null);
@@ -1067,7 +1075,10 @@ function LiveCapture({ onSaveCurve }) {
     const proc = procRef.current;
     setStrokeRate(proc.strokeRate);
     setStrokeCount(proc.strokeCount);
-    setLastStroke(proc.lastStroke);
+    // "Last Stroke" only means something live (the stroke you just pulled). In a
+    // loaded recording it's just the final stroke in the file — an arbitrary,
+    // unrepresentative overlay — so don't show it when reviewing.
+    setLastStroke(null);
     setAvgCurve(proc.avgCurve);
     setHasGPSAnchoring(proc.hasGPS);
     publishAvgFreeSpeed();
@@ -1192,10 +1203,11 @@ function LiveCapture({ onSaveCurve }) {
   };
 
   const handleOpenInCalculator = () => {
-    // Open whatever's on the chart: a single inspected stroke when one is
-    // selected, otherwise the average of the reviewed strokes.
-    const curveToSave = individualStroke ? individualStroke.curve : displayAvgCurve;
-    if (!curveToSave || !onSaveCurve) return;
+    // Open whatever the readouts describe: a single inspected stroke when one is
+    // selected, otherwise the reviewed range's median (typical) stroke — never a
+    // flattened average, which would understate the curve's variation.
+    const curveToSave = comparisonCurve;
+    if (!curveToSave) return;
 
     let scaledSpeeds;
     let raceTime;
@@ -1213,14 +1225,18 @@ function LiveCapture({ onSaveCurve }) {
     }
     const desc = individualStroke
       ? `1 stroke at ${displayStrokeRate} spm${hasGPSAnchoring ? ' (GPS)' : ''}`
-      : `${displayCount} strokes at ${displayStrokeRate} spm${hasGPSAnchoring ? ' (GPS)' : ''}`;
-    onSaveCurve({
-      name: `Live Capture ${new Date().toLocaleString()}`,
+      : `median of ${displayCount} strokes at ${displayStrokeRate} spm${hasGPSAnchoring ? ' (GPS)' : ''}`;
+    // Open in a new tab via a share-hash URL so the live session stays loaded
+    // here — the calculator decodes the curve from #s= on load (parseShareHash).
+    const encoded = encodeCurve(
+      `Live Capture ${new Date().toLocaleString()}`,
       desc,
-      speeds: scaledSpeeds,
-      strokeRate: displayStrokeRate || 36,
+      scaledSpeeds,
       raceTime,
-    });
+      displayStrokeRate || 36,
+    );
+    const url = `${window.location.origin}${window.location.pathname}#s=${encoded}`;
+    window.open(url, '_blank', 'noopener');
   };
 
   // --- Chart ---
@@ -1242,6 +1258,88 @@ function LiveCapture({ onSaveCurve }) {
 
   const individualStroke = (selectedIndex != null && strokes[selectedIndex]) || null;
 
+  // Untapped (free-speed s/2k) for every stroke in the reviewed range, each
+  // paired with its index in `strokes`. This is the distribution the coach
+  // explores. We work off real per-stroke values rather than a pointwise average
+  // of the curves: averaging flattens the speed profile — phase jitter and noise
+  // smear the catch dip and drive surge — which shrinks the very variation
+  // untapped speed is measured from, so an averaged curve reports less untapped
+  // than any real stroke and flatters the rower. Review-only (needs GPS for the
+  // untapped metric to be meaningful).
+  const rangeUntapped = useMemo(() => {
+    if (isCapturing || isWatching || !hasGPSAnchoring || !selectedStrokes || selectedStrokes.length === 0) return null;
+    const out = [];
+    for (const s of selectedStrokes) {
+      const v = freeSpeedSecondsFor(s.curve);
+      if (v != null) out.push({ idx: strokes.indexOf(s), v });
+    }
+    return out.length ? out : null;
+  }, [isCapturing, isWatching, hasGPSAnchoring, selectedStrokes]);
+
+  // Summary stats over the range's untapped times. Median is the headline
+  // central value (robust); mean is shown alongside so a skewed distribution is
+  // visible (mean > median ⇒ a tail of bad strokes dragging the average up).
+  const untappedStats = useMemo(() => {
+    if (!rangeUntapped) return null;
+    const vs = rangeUntapped.map((r) => r.v).sort((a, b) => a - b);
+    const n = vs.length;
+    const mean = vs.reduce((a, b) => a + b, 0) / n;
+    const median = n % 2 ? vs[(n - 1) / 2] : (vs[n / 2 - 1] + vs[n / 2]) / 2;
+    const sd = Math.sqrt(vs.reduce((a, b) => a + (b - mean) ** 2, 0) / n);
+    return { n, mean, median, sd, min: vs[0], max: vs[n - 1] };
+  }, [rangeUntapped]);
+
+  // The real stroke nearest the median untapped — the "typical" stroke the
+  // headline reads off and the calculator opens.
+  const medianStroke = useMemo(() => {
+    if (!rangeUntapped || !untappedStats) return null;
+    let best = null, bestD = Infinity;
+    for (const r of rangeUntapped) {
+      const d = Math.abs(r.v - untappedStats.median);
+      if (d < bestD) { bestD = d; best = r; }
+    }
+    return best ? strokes[best.idx] : null;
+  }, [rangeUntapped, untappedStats]);
+
+  // Histogram of the untapped distribution. Each bin keeps the stroke indices
+  // that fall in it, so clicking a bar maps straight to a highlight set on the
+  // stroke-time chart. ~√n bins, clamped, for a sane shape at any range size.
+  const untappedBins = useMemo(() => {
+    if (!rangeUntapped || !untappedStats) return null;
+    const { min, max, n } = untappedStats;
+    const nBins = Math.max(5, Math.min(15, Math.round(Math.sqrt(n))));
+    const width = max > min ? (max - min) / nBins : 1;
+    const bins = Array.from({ length: nBins }, (_, i) => ({
+      x0: min + i * width, x1: min + (i + 1) * width, idxs: [],
+    }));
+    for (const { idx, v } of rangeUntapped) {
+      let b = Math.floor((v - min) / width);
+      if (b >= nBins) b = nBins - 1;
+      if (b < 0) b = 0;
+      bins[b].idxs.push(idx);
+    }
+    return bins;
+  }, [rangeUntapped, untappedStats]);
+
+  // Which bin is spotlighted: the user's click, else the one holding the median
+  // (binned with the same formula as the histogram so they always agree).
+  const defaultBin = useMemo(() => {
+    if (!untappedBins || !untappedStats) return -1;
+    const { min, max, median } = untappedStats;
+    const width = max > min ? (max - min) / untappedBins.length : 1;
+    return Math.max(0, Math.min(untappedBins.length - 1, Math.floor((median - min) / width)));
+  }, [untappedBins, untappedStats]);
+  const activeBin = selectedBin != null ? selectedBin : defaultBin;
+
+  // Stroke indices to glow green on the stroke-time chart — the active bin's.
+  const highlightedIndices = useMemo(() => {
+    if (!untappedBins || activeBin < 0 || !untappedBins[activeBin]) return null;
+    return new Set(untappedBins[activeBin].idxs);
+  }, [untappedBins, activeBin]);
+
+  // A new range means a new distribution — fall back to the median bin.
+  useEffect(() => { setSelectedBin(null); }, [selection]);
+
   // Stroke-rate readout, mirroring the split: inspecting a stroke → its cadence
   // there; reviewing a range (or the whole session) → the mean cadence; live →
   // the running rate. Per-stroke `spm` is stamped at capture time.
@@ -1257,10 +1355,12 @@ function LiveCapture({ onSaveCurve }) {
   }
 
   // The stroke being compared against potential: the inspected one, else the
-  // live latest stroke, else the reviewed average.
+  // live latest stroke, else the reviewed range's median (typical) stroke. The
+  // headline untapped number reads off this curve, so a range now reports the
+  // median real stroke's untapped time, not an averaged-and-flattered one.
   const comparisonCurve = individualStroke ? individualStroke.curve
     : (isCapturing || isWatching) ? lastStroke
-    : displayAvgCurve;
+    : (medianStroke ? medianStroke.curve : displayAvgCurve);
   // Scale the dashed potential to the stroke on screen the same way freeSpeedGain
   // does — to equal power (mean-cube), not equal mean — so the line you see *is*
   // the curve the free-speed number is measured against: your effort, the
@@ -1272,8 +1372,9 @@ function LiveCapture({ onSaveCurve }) {
     : 1;
 
   // Roll captured curves so the chart begins where the catch deceleration kicks
-  // in (see catchStartIndex). Driven by the stroke on screen so the average and
-  // the inspected/last stroke stay mutually aligned; the reference uses its own.
+  // in (see catchStartIndex). rollStart is the catch of the stroke on screen
+  // (inspected, else the live last stroke); the reference rolls to its own catch
+  // so x=0 is the catch for both lines.
   const rollStart = comparisonCurve && comparisonCurve.length
     ? catchStartIndex(comparisonCurve)
     : 0;
@@ -1281,9 +1382,8 @@ function LiveCapture({ onSaveCurve }) {
   // Auto-scale the y-axis to whatever's plotted (scaled potential + the curves
   // shown), padded, so each stroke fills the frame instead of a fixed scale.
   const ys = REF_SPEEDS.map((s) => s * potentialScale);
-  if (displayAvgCurve) ys.push(...displayAvgCurve);
   if (individualStroke) ys.push(...individualStroke.curve);
-  else if (lastStroke && displayAvgCurve) ys.push(...lastStroke);
+  else if (lastStroke && (isCapturing || isWatching)) ys.push(...lastStroke);
   const yLo = Math.min(...ys), yHi = Math.max(...ys);
   const yPad = Math.max((yHi - yLo) * 0.1, 0.2);
   const yMin = yLo - yPad, yMax = yHi + yPad;
@@ -1302,23 +1402,6 @@ function LiveCapture({ onSaveCurve }) {
       },
     ];
 
-    if (displayAvgCurve) {
-      datasets.push({
-        label: individualStroke
-          ? `Average (${displayCount} strokes)`
-          : `Average (${displayCount} strokes)`,
-        data: rollCurve(displayAvgCurve, rollStart).map((s, i) => ({ x: PHASE_TIMES[i], y: s })),
-        borderColor: individualStroke ? 'rgba(102, 126, 234, 0.35)' : '#667eea',
-        backgroundColor: individualStroke
-          ? 'rgba(102, 126, 234, 0.04)'
-          : 'rgba(102, 126, 234, 0.1)',
-        borderWidth: individualStroke ? 2 : 3,
-        pointRadius: 0,
-        tension: 0.4,
-        fill: !individualStroke,
-      });
-    }
-
     if (individualStroke) {
       datasets.push({
         label: `Stroke #${selectedIndex + 1} of ${strokes.length}`,
@@ -1330,7 +1413,7 @@ function LiveCapture({ onSaveCurve }) {
         tension: 0.4,
         fill: true,
       });
-    } else if (lastStroke && displayAvgCurve) {
+    } else if (lastStroke && (isCapturing || isWatching)) {
       datasets.push({
         label: 'Last Stroke',
         data: rollCurve(lastStroke, rollStart).map((s, i) => ({ x: PHASE_TIMES[i], y: s })),
@@ -1343,7 +1426,7 @@ function LiveCapture({ onSaveCurve }) {
     }
 
     return { datasets };
-  }, [displayAvgCurve, lastStroke, displayCount, individualStroke, selectedIndex, strokes.length, potentialScale, rollStart]);
+  }, [lastStroke, individualStroke, selectedIndex, strokes.length, potentialScale, rollStart, isCapturing, isWatching]);
 
   // --- Stroke-time chart (one point per stroke, drag-to-select range) ---
 
@@ -1371,15 +1454,23 @@ function LiveCapture({ onSaveCurve }) {
         data: strokes.map(s => ({ x: (s.time - t0) / 1000, y: strokeY(s) })),
         spanGaps: true,
         borderColor: '#667eea',
-        backgroundColor: (ctx) => ctx.dataIndex === selectedIndex ? '#ef4444' : '#667eea',
+        // Red = the inspected stroke; green = strokes in the highlighted untapped
+        // bin (the typical band, or whichever histogram bar the coach tapped).
+        backgroundColor: (ctx) => ctx.dataIndex === selectedIndex ? '#ef4444'
+          : (highlightedIndices && highlightedIndices.has(ctx.dataIndex)) ? '#10b981' : '#667eea',
+        pointBorderColor: (ctx) =>
+          highlightedIndices && highlightedIndices.has(ctx.dataIndex) && ctx.dataIndex !== selectedIndex ? '#ffffff' : 'transparent',
+        pointBorderWidth: (ctx) =>
+          highlightedIndices && highlightedIndices.has(ctx.dataIndex) && ctx.dataIndex !== selectedIndex ? 1 : 0,
         borderWidth: 1.5,
-        pointRadius: (ctx) => ctx.dataIndex === selectedIndex ? 6 : 2.5,
+        pointRadius: (ctx) => ctx.dataIndex === selectedIndex ? 6
+          : (highlightedIndices && highlightedIndices.has(ctx.dataIndex)) ? 4.5 : 2.5,
         pointHoverRadius: 6,
         tension: 0,
         fill: false,
       }],
     };
-  }, [strokes, t0, selectedIndex, hasGPSAnchoring]);
+  }, [strokes, t0, selectedIndex, highlightedIndices, hasGPSAnchoring]);
 
   const chrome = useChartChrome();
   const timeChartOptions = useMemo(() => ({
@@ -1416,7 +1507,13 @@ function LiveCapture({ onSaveCurve }) {
               const pad = Math.max((hi - lo) * 0.05, 1);
               return { min: lo - pad, max: hi + pad };
             })()
-          : {}),
+          // No selection: pin the axis to the full stroke-time extent so the
+          // chart's left/right edges line up with the range slider's ends.
+          // Otherwise Chart.js auto-scales to only the drawn points and drops
+          // null-y warm-up strokes (no GPS yet), making the axis start partway in.
+          : (strokes.length > 0
+              ? { min: 0, max: (strokes[strokes.length - 1].time - t0) / 1000 }
+              : {})),
         title: { display: true, text: 'Time (s)', color: chrome.title, font: { size: 11 } },
         ticks: { color: chrome.tick },
       },
@@ -1434,6 +1531,64 @@ function LiveCapture({ onSaveCurve }) {
       },
     },
   }), [hasGPSAnchoring, selection, t0, chrome]);
+
+  // --- Untapped-time histogram (review only): tap a bar to highlight strokes ---
+
+  const untappedHistData = useMemo(() => {
+    if (!untappedBins) return null;
+    return {
+      labels: untappedBins.map((b) => ((b.x0 + b.x1) / 2).toFixed(1)),
+      datasets: [{
+        label: 'strokes',
+        data: untappedBins.map((b) => b.idxs.length),
+        backgroundColor: untappedBins.map((_, i) =>
+          i === activeBin ? '#10b981' : 'rgba(102, 126, 234, 0.55)'),
+        borderWidth: 0,
+        categoryPercentage: 1,
+        barPercentage: 0.98,
+      }],
+    };
+  }, [untappedBins, activeBin]);
+
+  const untappedHistOptions = useMemo(() => ({
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    onClick: (_event, elements) => {
+      if (elements.length > 0) setSelectedBin(elements[0].index);
+    },
+    plugins: {
+      legend: { display: false },
+      title: {
+        display: true,
+        text: 'Untapped spread • tap a bar to spotlight those strokes',
+        color: chrome.title,
+        font: { size: 13, weight: 'normal' },
+      },
+      tooltip: {
+        callbacks: {
+          title: (items) => {
+            const b = untappedBins?.[items[0].dataIndex];
+            return b ? `${b.x0.toFixed(1)}–${b.x1.toFixed(1)} s untapped` : '';
+          },
+          label: (item) => `${item.raw} stroke${item.raw === 1 ? '' : 's'}`,
+        },
+      },
+    },
+    scales: {
+      x: {
+        grid: { display: false },
+        title: { display: true, text: 'Untapped (s / 2k)', color: chrome.title, font: { size: 11 } },
+        ticks: { color: chrome.tick, maxRotation: 0, autoSkipPadding: 12 },
+      },
+      y: {
+        grid: { color: chrome.grid },
+        title: { display: true, text: 'Strokes', color: chrome.title, font: { size: 11 } },
+        ticks: { color: chrome.tick, precision: 0 },
+        beginAtZero: true,
+      },
+    },
+  }), [chrome, untappedBins]);
 
   const resetSelection = () => {
     setSelection(null);
@@ -1743,6 +1898,42 @@ function LiveCapture({ onSaveCurve }) {
           <span className="live-stat-label">/500m</span>
         </div>
       )}
+      {freeSpeedSeconds != null && (
+        <div className="live-stat live-free-stat">
+          <span
+            className="live-stat-value live-free-value"
+            style={{ color: freeSpeedSeconds > 0.5 ? 'var(--warning)' : 'var(--success)' }}
+          >
+            {(freeSpeedSeconds >= 0 ? '+' : '−') + Math.abs(freeSpeedSeconds).toFixed(1) + ' s'}
+          </span>
+          <span className="live-stat-label">
+            untapped
+            <button
+              type="button"
+              className="live-free-info-btn"
+              aria-label="What is untapped speed?"
+              aria-expanded={showFreeInfo}
+              onClick={() => setShowFreeInfo((v) => !v)}
+            >
+              ⓘ
+            </button>
+          </span>
+          {showFreeInfo && (
+            <div className="live-free-info" role="tooltip">
+              Seconds per 2k you'd gain at this same effort by smoothing your
+              speed curve to match your potential. Lower is better.
+              <button
+                type="button"
+                className="live-free-info-close"
+                aria-label="Dismiss"
+                onClick={() => setShowFreeInfo(false)}
+              >
+                ✕
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       <div className="live-stat">
         <span className={`live-stat-value live-gps-value ${gpsActive ? 'gps-active' : ''}`}>
           {gpsActive ? 'GPS' : gpsStatus === 'requesting' ? '...' : '—'}
@@ -1762,6 +1953,29 @@ function LiveCapture({ onSaveCurve }) {
       <div className="live-chart-wrapper">
         <Line data={chartData} options={chartOptions} />
       </div>
+      {avgCurve && (
+        <button
+          className="live-calc-btn"
+          onClick={handleOpenInCalculator}
+          aria-label="Open this stroke in the Efficiency Calculator (new tab)"
+          title="Open in Efficiency Calculator (new tab)"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <rect x="4" y="2" width="16" height="20" rx="2" />
+            <line x1="8" y1="6" x2="16" y2="6" />
+            <line x1="8" y1="10" x2="8" y2="10" />
+            <line x1="12" y1="10" x2="12" y2="10" />
+            <line x1="16" y1="10" x2="16" y2="10" />
+            <line x1="8" y1="14" x2="8" y2="14" />
+            <line x1="12" y1="14" x2="12" y2="14" />
+            <line x1="16" y1="14" x2="16" y2="14" />
+            <line x1="8" y1="18" x2="8" y2="18" />
+            <line x1="12" y1="18" x2="12" y2="18" />
+            <line x1="16" y1="18" x2="16" y2="18" />
+          </svg>
+        </button>
+      )}
       <button
         className="live-bigscreen-btn"
         onClick={() => setBigScreen(true)}
@@ -1815,6 +2029,9 @@ function LiveCapture({ onSaveCurve }) {
   const loPct = lastIdx > 0 ? (rangeLo / lastIdx) * 100 : 0;
   const hiPct = lastIdx > 0 ? (rangeHi / lastIdx) * 100 : 100;
 
+  // Untapped seconds with an explicit sign, matching the headline readout.
+  const fmtUntapped = (v) => (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(1) + 's';
+
   const timeChartView = showStrokeInspector && (
     <div className="live-time-chart">
       <div className="live-time-chart-wrapper">
@@ -1866,7 +2083,7 @@ function LiveCapture({ onSaveCurve }) {
           </button>
           {individualStroke && (
             <button className="btn btn-secondary btn-sm" onClick={() => setSelectedIndex(null)}>
-              Show average
+              Show median
             </button>
           )}
           {selection && (
@@ -1876,6 +2093,41 @@ function LiveCapture({ onSaveCurve }) {
           )}
         </div>
       </div>
+      {untappedStats && untappedHistData && (
+        <div className="live-untapped-panel">
+          <div className="live-untapped-stats">
+            <span className="live-untapped-stat">
+              <strong>{fmtUntapped(untappedStats.median)}</strong> median
+            </span>
+            <span className="live-untapped-stat">
+              <strong>{fmtUntapped(untappedStats.mean)}</strong> mean
+            </span>
+            <span className="live-untapped-stat">
+              ±{untappedStats.sd.toFixed(1)}s spread
+            </span>
+            <span className="live-untapped-stat">
+              {fmtUntapped(untappedStats.min)}…{fmtUntapped(untappedStats.max)} range
+            </span>
+            <span className="live-untapped-stat">{untappedStats.n} strokes</span>
+          </div>
+          <div className="live-untapped-hist-wrapper">
+            <Bar data={untappedHistData} options={untappedHistOptions} />
+          </div>
+          {highlightedIndices && (
+            <div className="live-untapped-hint">
+              <span>
+                {highlightedIndices.size} stroke{highlightedIndices.size === 1 ? '' : 's'} highlighted
+                {selectedBin == null ? ' (typical band)' : ''}
+              </span>
+              {selectedBin != null && (
+                <button className="btn btn-secondary btn-sm" onClick={() => setSelectedBin(null)}>
+                  Back to median
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 
@@ -1903,11 +2155,6 @@ function LiveCapture({ onSaveCurve }) {
   // Save / download (shared by both roles once a session has ended).
   const sessionActions = (
     <>
-      {avgCurve && (
-        <button className="btn btn-primary btn-large" onClick={handleOpenInCalculator}>
-          Open in Calculator
-        </button>
-      )}
       {/* Real-time replay of a loaded/captured recording — drive the live UI
           from a desk for testing. Replays the selected stroke range when one is
           set (drag the slider above), otherwise the whole row. */}
@@ -2084,11 +2331,6 @@ function LiveCapture({ onSaveCurve }) {
                   Pause to inspect
                 </button>
               )
-            )}
-            {avgCurve && (
-              <button className="btn btn-primary btn-large" onClick={handleOpenInCalculator}>
-                Open in Calculator
-              </button>
             )}
             {(hasRecording || (isWatching && strokeCount > 0)) && (
               <button className="btn btn-secondary btn-large" onClick={downloadRecording}>

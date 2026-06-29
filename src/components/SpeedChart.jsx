@@ -12,7 +12,7 @@ import {
 } from 'chart.js';
 import { Line } from 'react-chartjs-2';
 import annotationPlugin from 'chartjs-plugin-annotation';
-import { catchStartIndex, rollCurve, catchAlignedPhases } from '../utils/curves';
+import { catchAlignedPhases } from '../utils/curves';
 import { useChartChrome } from '../utils/chartTheme';
 
 ChartJS.register(
@@ -39,18 +39,13 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, energyPenaltyPerc
   const timesA_s = timesA.map(t => t * strokeDuration);
   const timesB_s = timesB.map(t => t * strokeDuration);
 
-  // Roll both curves so each begins at its catch — where the boat starts slowing
-  // hard into its slowest point — matching the live-capture profile. Display
-  // only: the stored curves and every physics figure (roll-invariant) are
-  // unchanged. The draw handler maps clicks back through offsetB.
-  // While drawing, freeze offsetB (captured at drag start) so editing a point
-  // can't move the detected catch and shift the whole curve mid-drag; it
-  // re-aligns on release.
-  const dragOffsetRef = useRef(0);
-  const offsetA = catchStartIndex(speedsA);
-  const offsetB = isDrawing ? dragOffsetRef.current : catchStartIndex(speedsB);
-  const rolledA = rollCurve(speedsA, offsetA);
-  const rolledB = rollCurve(speedsB, offsetB);
+  // On the calculator each stored curve already begins at the catch, so it is
+  // drawn exactly as stored — no catch detection, no horizontal roll. Re-running
+  // catch detection while editing would move the detected catch as points change
+  // and shift the whole curve left/right, making the editor feel like it
+  // rearranges itself instead of just moving the dragged point.
+  const rolledA = speedsA;
+  const rolledB = speedsB;
 
   // Compute Y-axis bounds from actual data with padding
   const allSpeeds = [...speedsA, ...speedsB];
@@ -247,14 +242,14 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, energyPenaltyPerc
     const xValue = xScale.getValueForPixel(x);
     const yValue = yScale.getValueForPixel(y);
 
-    // Find the closest point on the displayed (rolled) curve, then map it back
-    // to the stored index via offsetB so the edit lands on the right point.
+    // Find the closest point on the curve. With no roll, the displayed index is
+    // the stored index (the periodic last point folds back onto the first).
     const displayIndex = timesB_s.reduce((best, t, i) =>
       Math.abs(t - xValue) < Math.abs(timesB_s[best] - xValue) ? i : best, 0);
 
     if (displayIndex >= 0 && displayIndex < speedsB.length && yValue > 0 && yValue < 10) {
       const m = speedsB.length - 1;
-      const storedIndex = (offsetB + displayIndex) % m;
+      const storedIndex = displayIndex % m;
       const newSpeeds = [...speedsB];
       newSpeeds[storedIndex] = yValue;
       onCurveBChange(newSpeeds);
@@ -262,7 +257,6 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, energyPenaltyPerc
   };
 
   const handleMouseDown = (event) => {
-    dragOffsetRef.current = catchStartIndex(speedsB); // freeze alignment for the drag
     setIsDrawing(true);
     updateCurveFromMouse(event);
   };
@@ -297,7 +291,7 @@ function SpeedChart({ curveA, curveB, onCurveBChange, onReset, energyPenaltyPerc
       canvas.removeEventListener('mouseup', onUp);
       canvas.removeEventListener('mouseleave', onUp);
     };
-  }, [isDrawing, speedsB, timesB, strokeRate, offsetB]);
+  }, [isDrawing, speedsB, timesB, strokeRate]);
 
   return (
     <div className="chart-container">

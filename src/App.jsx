@@ -8,8 +8,8 @@ import OarCapture from './components/OarCapture';
 import VideoAnalysis from './components/VideoAnalysis';
 import Tradeoffs from './components/Tradeoffs';
 import AppShell from './components/AppShell';
-import { normalizeCurve } from './utils/curves';
-import { calculateEnergy, calculateAveragePower, estimateFinishTime, calculateEnergyPenalty } from './utils/physics';
+import { offsetCurveToAverage } from './utils/curves';
+import { calculateEnergy, estimateFinishTime, calculateEnergyPenalty } from './utils/physics';
 import referenceCurveData from './data/referenceCurve.json';
 import './App.css';
 
@@ -81,7 +81,7 @@ function App() {
   const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
-    const normalizedSpeeds = normalizeCurve(curveB.speeds, targetAvgSpeed);
+    const normalizedSpeeds = offsetCurveToAverage(curveB.speeds, targetAvgSpeed);
     setCurveBNormalized({ times: curveB.times, speeds: normalizedSpeeds });
   }, [curveB, raceTime]);
 
@@ -170,36 +170,24 @@ function App() {
     setRefreshKey(k => k + 1);
   };
 
-  const handleSaveLiveCurve = (curveData) => {
-    const entry = {
-      id: Date.now(),
-      name: curveData.name,
-      desc: curveData.desc,
-      speeds: curveData.speeds,
-      raceTime: curveData.raceTime ?? 450,
-      strokeRate: curveData.strokeRate,
-      savedAt: new Date().toISOString(),
-    };
-    const existing = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-    localStorage.setItem(STORAGE_KEY, JSON.stringify([entry, ...existing]));
-    setRaceTime(entry.raceTime);
-    setStrokeRate(entry.strokeRate);
-    setCurveB({ times: [...referenceCurveData.times], speeds: entry.speeds });
-    setViewingCurve(entry);
-    setIsDirty(false);
-    setRefreshKey(k => k + 1);
-    window.location.hash = '';
-  };
-
-  const avgPowerA = calculateAveragePower(curveA.times, curveA.speeds);
-  const avgPowerBNorm = calculateAveragePower(curveBNormalized.times, curveBNormalized.speeds);
-  const estimate = estimateFinishTime(raceTime, avgPowerA, avgPowerBNorm);
+  // Mean cubic speed ∝ average power (P = k·v³). We use the plain mean of v³ —
+  // the same convention as the live "untapped" free-speed metric
+  // (freeSpeedSecondsFor) — so the calculator's time difference matches it exactly.
+  // (calculateAveragePower integrates trapezoidally, which drops the closed curve's
+  // duplicated endpoint and disagrees by a few percent.)
+  const meanCube = (speeds) => speeds.reduce((a, v) => a + v * v * v, 0) / speeds.length;
+  const avgPowerA = meanCube(curveA.speeds);
+  const avgPowerBNorm = meanCube(curveBNormalized.speeds);
+  // raceTime is your *current* 2k time (it comes from the measured pace of the
+  // stroke you opened). Your potential is the faster time the same energy would
+  // yield with the smoother reference curve: T_pot = raceTime * (P_A / P_B)^(1/3).
+  const estimate = estimateFinishTime(raceTime, avgPowerBNorm, avgPowerA);
   const energyA = calculateEnergy(curveA.times, curveA.speeds);
   const energyBNorm = calculateEnergy(curveBNormalized.times, curveBNormalized.speeds);
   const penalty = calculateEnergyPenalty(energyBNorm * raceTime, energyA * raceTime);
 
   if (activePage === 'live') {
-    return <LiveCapture onSaveCurve={handleSaveLiveCurve} />;
+    return <LiveCapture />;
   }
 
   if (activePage === 'oar') {
@@ -217,11 +205,6 @@ function App() {
   return (
     <AppShell page="calculator" title="Rowing Efficiency Calculator">
     <div className="app">
-      <p className="subtitle">
-        How much time are you leaving on the water? Draw a boat speed profile and see how
-        a smoother stroke — same average speed, less energy — translates to a faster finish time.
-      </p>
-
       <div className="app-content">
         <SavedCurves
           onLoad={handleLoadCurve}
@@ -232,6 +215,11 @@ function App() {
         />
 
         <div className="main-content">
+          <p className="subtitle">
+            How much time are you leaving on the water? Draw a boat speed profile and see how
+            a smoother stroke — same average speed, less energy — translates to a faster finish time.
+          </p>
+
           <CurveHeader
             key={viewingCurve?.id ?? 'new'}
             entry={viewingCurve}

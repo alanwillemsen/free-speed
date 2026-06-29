@@ -13,7 +13,7 @@ const NOISE_ALPHA = 0.4;          // EMA alpha for noise reduction
 const STROKE_DETECT_ALPHA = 0.06; // EMA alpha for stroke boundary detection
 const MIN_STROKE_MS = 800;
 const MAX_STROKE_MS = 4000;
-const MAX_STROKES = 500;          // Rolling window for averaging
+const AVG_WINDOW_STROKES = 500;   // live rolling average spans the most recent N strokes
 export const CALIBRATION_MS = 3000; // Auto-orientation calibration window
 const ORIENT_WINDOW_MS = 5000;    // rolling window for the direction estimate (a stroke+)
 const ORIENT_REEVAL_MS = 1000;    // recompute the motion direction at most this often
@@ -395,12 +395,18 @@ export function feedSample(proc, accelValues, now, gpsSpeeds, { allowWithoutGps 
           const freeSec = proc.hasGPS ? freeSpeedSecondsFor(curve) : null;
           // startTime/time bound the stroke for video-sync (which phase is live).
           newStroke = { time: now, startTime, curve, avgSpeed, gpsSpeed, spm: proc.strokeRate, freeSec };
+          // Keep the full stroke list (the post-session inspector / slider needs
+          // every stroke), but average only the most recent window so the live
+          // readout reflects current form, not the whole session including warm-up.
           proc.strokes.push(newStroke);
-          if (proc.strokes.length > MAX_STROKES) proc.strokes.shift();
           proc.strokeCount++;
           proc.lastStroke = curve;
           proc.lastGpsSpeed = gpsSpeed;
-          proc.avgCurve = averageCurves(proc.strokes);
+          proc.avgCurve = averageCurves(
+            proc.strokes.length > AVG_WINDOW_STROKES
+              ? proc.strokes.slice(-AVG_WINDOW_STROKES)
+              : proc.strokes
+          );
         }
       }
     }
