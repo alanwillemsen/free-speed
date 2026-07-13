@@ -13,6 +13,8 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import LiveBigScreen from './LiveBigScreen';
+import TrackMap from './TrackMap';
+import { boatFixAt } from '../utils/geo';
 import { usePeerLink } from '../hooks/usePeerLink';
 import { useWakeLock } from '../hooks/useWakeLock';
 import { useVideoRecorder } from '../hooks/useVideoRecorder';
@@ -28,7 +30,7 @@ import {
   NUM_POINTS, MIN_ROW_SPEED, MAX_ROW_SPEED, SPLIT_WINDOW_MS,
   REF_SPEEDS, REF_AVG, REF_ROLLED, PHASE_TIMES,
   windowedGpsSpeed, averageCurves, freeSpeedSecondsFor,
-  makeProc, feedSample, buildReplayEvents, subtractGravity,
+  makeProc, feedSample, buildReplayEvents, subtractGravity, gravityFromAngles,
 } from '../utils/strokePipeline';
 
 ChartJS.register(LinearScale, CategoryScale, PointElement, LineElement, BarElement, Title, Tooltip, Legend, Filler);
@@ -119,6 +121,10 @@ function LiveCapture() {
   // engine in utils/strokePipeline) — no separate ref needed.
   const orientationRef = useRef({ beta: 0, gamma: 0 });
   const gpsRef = useRef({ speeds: [], watchId: null });
+  // GPS fixes with a position ({ t, lat, lon, heading|null }), kept for the whole
+  // session — the map's track. Synced to `positions` state ~1/s (fix rate).
+  const positionsRef = useRef([]);
+  const [positions, setPositions] = useState([]);
   // Accumulated distance (m) from trapezoidal integration of GPS speed. `piece`
   // is resettable; `session` runs the whole capture. last* hold the previous
   // sample for the integration step.
@@ -254,6 +260,14 @@ function LiveCapture() {
       const sample = { t: now };
       if (a && a.x != null) { sample.ax = a.x; sample.ay = a.y; sample.az = a.z; }
       if (ag && ag.x != null) { sample.axg = ag.x; sample.ayg = ag.y; sample.azg = ag.z; }
+      // Gyro rates (deg/s), rounded to keep recordings lean. Not consumed by the
+      // pipeline yet — recorded so future attitude analysis has a clean source.
+      const rr = event.rotationRate;
+      if (rr && rr.alpha != null) {
+        sample.ra = Math.round(rr.alpha * 100) / 100;
+        sample.rb = Math.round(rr.beta * 100) / 100;
+        sample.rg = Math.round(rr.gamma * 100) / 100;
+      }
       rec.motion.push(sample);
       // Stream to a connected coach. Guard on nowOverride so coach-fed samples
       // (replay / received stream) never get re-buffered; the flush interval
@@ -265,12 +279,20 @@ function LiveCapture() {
     }
 
     // --- Gravity compensation ---
+    // `gravity` (for roll/pitch tracking) prefers the fusion's own estimate
+    // (accelIncludingGravity − linearAccel); orientation angles are the fallback.
     let accelValues;
+    let gravity = null;
     if (event.acceleration && event.acceleration.x != null) {
       accelValues = event.acceleration;
+      const ag = event.accelerationIncludingGravity;
+      if (ag && ag.x != null) {
+        gravity = { x: ag.x - accelValues.x, y: ag.y - accelValues.y, z: ag.z - accelValues.z };
+      }
     } else if (event.accelerationIncludingGravity) {
       const { beta, gamma } = orientationRef.current;
       accelValues = subtractGravity(event.accelerationIncludingGravity, beta, gamma);
+      gravity = gravityFromAngles(beta, gamma);
     } else {
       return;
     }
@@ -281,6 +303,7 @@ function LiveCapture() {
     // data (nowOverride set) records without it.
     const stroke = feedSample(proc, accelValues, now, gpsRef.current.speeds, {
       allowWithoutGps: nowOverride != null,
+      gravity,
     });
 
     // Accumulate the piece free-speed average that the big screen reads, and
@@ -305,6 +328,8 @@ function LiveCapture() {
     procRef.current = makeProc(null);
     orientationRef.current = { beta: 0, gamma: 0 };
     gpsRef.current.speeds = [];
+    positionsRef.current = [];
+    setPositions([]);
     recvRef.current = { motion: 0, gps: 0, orientation: 0 };
     recordingRef.current = {
       version: 1,
@@ -348,6 +373,7 @@ function LiveCapture() {
       setSelection(null);
       setSelectedIndex(null);
     }
+    setPositions([...positionsRef.current]);
     const rec = recordingRef.current;
     if (rec && rec.motion.length > 0) setHasRecording(true);
   };
@@ -446,6 +472,9 @@ function LiveCapture() {
           for (const s of msg.samples) {
             accumulateDistance(s.t, s.speed);
             gpsRef.current.speeds.push({ time: s.t, speed: s.speed });
+            if (s.lat != null) {
+              positionsRef.current.push({ t: s.t, lat: s.lat, lon: s.lon, heading: s.head ?? null });
+            }
             if (rec) rec.gps.push(s);
           }
           const speeds = gpsRef.current.speeds;
@@ -658,6 +687,12 @@ function LiveCapture() {
     };
   }, [videoArmed]);
 
+  // Camera zoom stepping for the viewfinder buttons. Multiplicative steps feel
+  // uniform across the range (1 → 1.3 → 1.7 → 2.2 …); the hook clamps to the
+  // track's real min/max. `|| 1` guards a track that reports zoom 0.
+  const ZOOM_STEP = 1.3;
+  const zoomBy = (factor) => videoRecorder.setZoom((videoRecorder.zoom || 1) * factor);
+
   const startVideo = async () => {
     const anchor = await videoRecorder.start();
     if (!anchor) return;
@@ -726,6 +761,10 @@ function LiveCapture() {
     const id = setInterval(() => {
       const proc = procRef.current;
       if (!proc) return;
+      // The map track updates even while paused — fixes arrive ~1/s, and the
+      // no-change case returns the same array so no render happens.
+      setPositions((prev) =>
+        prev.length === positionsRef.current.length ? prev : [...positionsRef.current]);
       if (isPausedRef.current) return; // frozen for stroke inspection
       setStrokeRate(proc.strokeRate);
       setStrokeCount(proc.strokeCount);
@@ -804,6 +843,8 @@ function LiveCapture() {
 
   const startCapture = async () => {
     procRef.current = makeProc(performance.now());
+    positionsRef.current = [];
+    setPositions([]);
     recordingRef.current = {
       version: 1,
       startedAt: new Date().toISOString(),
@@ -869,6 +910,14 @@ function LiveCapture() {
             if (pos.coords.latitude != null) {
               gpsSample.lat = pos.coords.latitude;
               gpsSample.lon = pos.coords.longitude;
+              // Device-reported course over ground — only trustworthy in motion.
+              const head = pos.coords.heading;
+              if (head != null && !Number.isNaN(head) && pos.coords.speed >= 0.5) {
+                gpsSample.head = head;
+              }
+              positionsRef.current.push({
+                t: gpsTime, lat: gpsSample.lat, lon: gpsSample.lon, heading: gpsSample.head ?? null,
+              });
             }
             if (rec) rec.gps.push(gpsSample);
             sendBufferRef.current.gps.push(gpsSample);
@@ -893,9 +942,11 @@ function LiveCapture() {
     // End an in-flight real-time replay: stop the loop and restore the source
     // recording so a follow-up download re-exports it. The teardown below is all
     // null-guarded, so it's safe even though a replay never set up GPS/streaming.
+    let replaySource = null;
     if (replayRef.current) {
       replayRef.current.cancel();
-      recordingRef.current = replayRef.current.recording;
+      replaySource = replayRef.current.recording;
+      recordingRef.current = replaySource;
       replayRef.current = null;
       setLiveReplayActive(false);
     }
@@ -932,8 +983,22 @@ function LiveCapture() {
       persistIntervalRef.current = null;
     }
     sessionStore.clear().catch(() => {});
+    setPositions([...positionsRef.current]);
     const rec = recordingRef.current;
     if (rec && rec.motion.length > 0) setHasRecording(true);
+    // Ending a live replay — hold-to-stop or the recording running out — lands
+    // back on the *whole* loaded recording, not the slice that happened to play:
+    // fast-forward the full file through the pipeline again, exactly as if it
+    // were freshly loaded, so it can be inspected or replayed again without
+    // re-loading. Deferred (same trick as handleLoadRecording) so the UI paints
+    // before the potentially multi-second synchronous replay blocks the thread.
+    if (replaySource) {
+      setIsReplaying(true);
+      setTimeout(() => {
+        replayRecording(replaySource);
+        setIsReplaying(false);
+      }, 50);
+    }
   };
 
   // Auto-start so the coach can hand over a phone that's already capturing —
@@ -1043,6 +1108,9 @@ function LiveCapture() {
     } else if (ev.k === 'g') {
       accumulateDistance(ev.t, ev.d.speed);
       gpsRef.current.speeds.push({ time: ev.t, speed: ev.d.speed });
+      if (ev.d.lat != null) {
+        positionsRef.current.push({ t: ev.t, lat: ev.d.lat, lon: ev.d.lon, heading: ev.d.head ?? null });
+      }
       const cutoff = ev.t - 30000;
       gpsRef.current.speeds = gpsRef.current.speeds.filter(s => s.time > cutoff);
       if (streaming) sendBufferRef.current.gps.push(ev.d);
@@ -1061,6 +1129,7 @@ function LiveCapture() {
   const replayRecording = (recording) => {
     procRef.current = makeProc(recording.motion[0]?.t ?? 0);
     gpsRef.current.speeds = [];
+    positionsRef.current = [];
     orientationRef.current = { beta: 0, gamma: 0 };
     resetDistance();
 
@@ -1086,6 +1155,7 @@ function LiveCapture() {
     setStrokes([...proc.strokes]);
     setSelection(null);
     setSelectedIndex(null);
+    setPositions([...positionsRef.current]);
     setPieceDistance(distanceRef.current.piece);
     setSessionDistance(distanceRef.current.session);
     setHasRecording(true);
@@ -1144,6 +1214,8 @@ function LiveCapture() {
 
     procRef.current = makeProc(events[0].t);
     gpsRef.current.speeds = [];
+    positionsRef.current = [];
+    setPositions([]);
     orientationRef.current = { beta: 0, gamma: 0 };
     resetDistance();
     recordingRef.current = null; // replay drives the pipeline; don't re-record
@@ -1191,7 +1263,7 @@ function LiveCapture() {
       if (idx < events.length) {
         state.rafId = requestAnimationFrame(step);
       } else {
-        stopCapture(); // snapshots proc → strokes, restores recording, clears replayRef
+        stopCapture(); // clears replayRef, then rebuilds the full loaded-recording state
       }
     };
     state.cancel = () => {
@@ -1275,6 +1347,21 @@ function LiveCapture() {
     }
     return out.length ? out : null;
   }, [isCapturing, isWatching, hasGPSAnchoring, selectedStrokes]);
+
+  // Median roll/pitch swing (deg/stroke) over the reviewed range — the balance
+  // readout for comparing rowers. Roll is the steadiness signal; pitch is mostly
+  // the systematic crew-mass movement. Null when strokes lack attitude data.
+  const attMedians = useMemo(() => {
+    if (!selectedStrokes || selectedStrokes.length === 0) return null;
+    const med = (vals) => {
+      if (!vals.length) return null;
+      const s = [...vals].sort((a, b) => a - b);
+      return s[Math.floor(s.length / 2)];
+    };
+    const roll = med(selectedStrokes.map((s) => s.rollDeg).filter((v) => v != null));
+    const pitch = med(selectedStrokes.map((s) => s.pitchDeg).filter((v) => v != null));
+    return roll != null || pitch != null ? { roll, pitch } : null;
+  }, [selectedStrokes]);
 
   // Summary stats over the range's untapped times. Median is the headline
   // central value (robust); mean is shown alongside so a skewed distribution is
@@ -1686,6 +1773,28 @@ function LiveCapture() {
   const isLive = isCapturing || isWatching;
   const gpsActive = gpsStatus === 'active' || hasGPSAnchoring;
 
+  // Boat marker for the map: while inspecting a stroke (tap a dot / Prev / Next)
+  // the position and direction of travel at the end of that stroke (strokes are
+  // stamped at their end); while live, the latest fix. Otherwise just the track.
+  const boatDisplay = useMemo(() => {
+    if (positions.length === 0) return null;
+    if (individualStroke) return boatFixAt(positions, individualStroke.time);
+    if (isLive) return boatFixAt(positions, positions[positions.length - 1].t);
+    return null;
+  }, [positions, individualStroke, isLive]);
+
+  const mapView = positions.length > 0 && (
+    <TrackMap
+      track={positions}
+      boat={boatDisplay}
+      label={individualStroke
+        ? (boatDisplay
+            ? `Stroke #${selectedIndex + 1} — position at end of stroke`
+            : `Stroke #${selectedIndex + 1} — no GPS fix near this stroke`)
+        : isLive ? 'Live position' : 'Session track'}
+    />
+  );
+
   // Rower-facing status stays calm: the link runs in the background while the
   // rower is on the water, so anything short of "connected" is just "waiting" —
   // signalling-server hiccups auto-retry (see usePeerLink) and aren't errors.
@@ -2068,11 +2177,20 @@ function LiveCapture() {
           {isPaused ? 'Paused · ' : ''}
           {individualStroke
             ? `Viewing stroke #${selectedIndex + 1} of ${strokes.length}${
-                splitText !== '—' ? ` · ${splitText} /500m` : ''}`
+                splitText !== '—' ? ` · ${splitText} /500m` : ''}${
+                individualStroke.rollDeg != null
+                  ? ` · roll ${individualStroke.rollDeg.toFixed(1)}° · pitch ${individualStroke.pitchDeg.toFixed(1)}°`
+                  : ''}`
             : selection
               ? `${displayCount} of ${strokes.length} strokes selected${
-                  splitText !== '—' ? ` · ${splitText} /500m` : ''}`
-              : `All ${strokes.length} strokes`}
+                  splitText !== '—' ? ` · ${splitText} /500m` : ''}${
+                  attMedians?.roll != null
+                    ? ` · roll ${attMedians.roll.toFixed(1)}° · pitch ${attMedians.pitch.toFixed(1)}°`
+                    : ''}`
+              : `All ${strokes.length} strokes${
+                  attMedians?.roll != null
+                    ? ` · roll ${attMedians.roll.toFixed(1)}° · pitch ${attMedians.pitch.toFixed(1)}°`
+                    : ''}`}
         </span>
         <div className="live-time-chart-actions">
           <button className="btn btn-secondary btn-sm" onClick={() => stepStroke(-1)} disabled={strokes.length === 0}>
@@ -2219,7 +2337,9 @@ function LiveCapture() {
 
   // Full-screen landscape viewfinder. The record/stop control sits on the right
   // edge (camera-app shutter position) so it falls under the right thumb when the
-  // phone is held two-handed in landscape. Exit (✕) is top-left, out of the way.
+  // phone is held two-handed in landscape; the zoom buttons flank it in the same
+  // column so a coach holding the phone right-handed can reach everything with
+  // the thumb. Exit (✕) is top-left, out of the way.
   const cameraOverlay = linkRole === 'coach' && videoRecorder.supported
     && (videoArmed || videoRecorder.isRecording) && (
     <div className="live-camera-fs" ref={cameraFsRef}>
@@ -2231,6 +2351,20 @@ function LiveCapture() {
       {videoRecorder.error && <p className="live-camera-error">{videoRecorder.error}</p>}
 
       <div className="live-camera-controls">
+        {videoRecorder.zoomCaps && (
+          <>
+            <span className="live-camera-zoom-level">{videoRecorder.zoom?.toFixed(1)}×</span>
+            <button
+              className="live-camera-zoom"
+              onClick={() => zoomBy(ZOOM_STEP)}
+              disabled={videoRecorder.zoom >= videoRecorder.zoomCaps.max}
+              aria-label="Zoom in"
+              title="Zoom in"
+            >
+              +
+            </button>
+          </>
+        )}
         {!videoRecorder.isRecording ? (
           <button
             className="live-camera-shutter live-camera-shutter-rec"
@@ -2247,6 +2381,17 @@ function LiveCapture() {
             title="Stop recording"
           >
             {savingBundle ? '…' : ''}
+          </button>
+        )}
+        {videoRecorder.zoomCaps && (
+          <button
+            className="live-camera-zoom"
+            onClick={() => zoomBy(1 / ZOOM_STEP)}
+            disabled={videoRecorder.zoom <= videoRecorder.zoomCaps.min}
+            aria-label="Zoom out"
+            title="Zoom out"
+          >
+            −
           </button>
         )}
       </div>
@@ -2274,6 +2419,7 @@ function LiveCapture() {
           onResetPiece={resetPiece}
           chartData={chartData}
           hasGPSAnchoring={hasGPSAnchoring}
+          track={positions}
           onClose={() => setBigScreen(false)}
         />
       )}
@@ -2318,6 +2464,7 @@ function LiveCapture() {
           {statsView}
           {chartView}
           {timeChartView}
+          {mapView}
           {activityView}
           {videoView}
           <div className="live-actions">
@@ -2383,6 +2530,7 @@ function LiveCapture() {
               {statsView}
               {chartView}
               {timeChartView}
+              {mapView}
               {activityView}
 
               <div className="live-actions">

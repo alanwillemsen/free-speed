@@ -9,6 +9,7 @@ import { useTheme } from '../hooks/useTheme';
 const DESTINATIONS = [
   { id: 'calculator', label: 'Efficiency Calculator', hash: '' },
   { id: 'live', label: 'Live Stroke Capture', hash: '#live' },
+  { id: 'course', label: 'Course Marks', hash: '#course' },
   { id: 'analyze', label: 'Video Analysis', hash: '#analyze' },
   { id: 'tradeoffs', label: 'Tradeoffs', hash: '#tradeoffs' },
 ];

@@ -7,6 +7,7 @@ import LiveCapture from './components/LiveCapture';
 import OarCapture from './components/OarCapture';
 import VideoAnalysis from './components/VideoAnalysis';
 import Tradeoffs from './components/Tradeoffs';
+import CourseMarks from './components/CourseMarks';
 import AppShell from './components/AppShell';
 import { offsetCurveToAverage } from './utils/curves';
 import { calculateEnergy, estimateFinishTime, calculateEnergyPenalty } from './utils/physics';
@@ -24,6 +25,7 @@ function App() {
     if (h === '#oar' || h.startsWith('#oar?')) return 'oar';
     if (h === '#analyze' || h.startsWith('#analyze?')) return 'analyze';
     if (h === '#tradeoffs') return 'tradeoffs';
+    if (h === '#course' || h.startsWith('#course?')) return 'course';
     return 'calculator';
   };
   const [activePage, setActivePage] = useState(pageFromHash);
@@ -200,6 +202,10 @@ function App() {
 
   if (activePage === 'tradeoffs') {
     return <Tradeoffs />;
+  }
+
+  if (activePage === 'course') {
+    return <CourseMarks />;
   }
 
   return (

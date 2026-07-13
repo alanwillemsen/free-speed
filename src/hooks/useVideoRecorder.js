@@ -31,6 +31,11 @@ export function useVideoRecorder() {
   const [stream, setStream] = useState(null);
   const [isRecording, setIsRecording] = useState(false);
   const [error, setError] = useState('');
+  // Camera zoom, when the track supports it (Android Chrome, iOS 17+ Safari):
+  // zoomCaps = { min, max, step } from getCapabilities(), zoom = current value.
+  // Both stay null on cameras without zoom so the UI can hide its controls.
+  const [zoom, setZoomState] = useState(null);
+  const [zoomCaps, setZoomCaps] = useState(null);
 
   const streamRef = useRef(null);
   const recorderRef = useRef(null);
@@ -48,6 +53,14 @@ export function useVideoRecorder() {
       streamRef.current = s;
       setStream(s);
       setError('');
+      const zc = s.getVideoTracks()[0]?.getCapabilities?.().zoom;
+      if (zc && zc.max > zc.min) {
+        setZoomCaps({ min: zc.min, max: zc.max, step: zc.step || 0.1 });
+        setZoomState(s.getVideoTracks()[0].getSettings?.().zoom ?? zc.min);
+      } else {
+        setZoomCaps(null);
+        setZoomState(null);
+      }
       return s;
     } catch (e) {
       setError(`Camera access failed: ${e?.message ?? e}`);
@@ -60,6 +73,21 @@ export function useVideoRecorder() {
     if (s) s.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     setStream(null);
+    setZoomCaps(null);
+    setZoomState(null);
+  }, []);
+
+  // Set the camera zoom (absolute value, clamped to the track's range). Safe to
+  // call while recording — MediaRecorder keeps rolling through constraint
+  // changes. No-op on cameras without zoom (zoomCaps stays null).
+  const setZoom = useCallback((value) => {
+    const track = streamRef.current?.getVideoTracks()[0];
+    const zc = track?.getCapabilities?.().zoom;
+    if (!zc) return;
+    const v = Math.min(zc.max, Math.max(zc.min, value));
+    track.applyConstraints({ advanced: [{ zoom: v }] })
+      .then(() => setZoomState(v))
+      .catch(() => {});
   }, []);
 
   // Begin recording. Returns the anchor { startCoachPerf, mime, fps } (the caller
@@ -118,5 +146,5 @@ export function useVideoRecorder() {
     streamRef.current = null;
   }, []);
 
-  return { supported, stream, isRecording, error, enable, disable, start, stop };
+  return { supported, stream, isRecording, error, enable, disable, start, stop, zoom, zoomCaps, setZoom };
 }

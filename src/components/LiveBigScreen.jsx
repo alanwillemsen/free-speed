@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Line } from 'react-chartjs-2';
 import { resolveTheme } from '../hooks/useTheme';
+import NavMap from './NavMap';
 
 // Outdoor full-screen readout for the rower: just the split, the stroke rate,
 // and the stroke speed profile, sized to be legible at arm's length without
@@ -24,7 +25,10 @@ const THEMES = {
   },
 };
 
-function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strokeRate, pieceDistance, sessionDistance, onResetPiece, chartData, hasGPSAnchoring, onClose }) {
+// Persisted panel choice (map vs. stroke graph) for the big-screen readout.
+const PANEL_KEY = 'freespeed_bigscreen_panel';
+
+function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strokeRate, pieceDistance, sessionDistance, onResetPiece, chartData, hasGPSAnchoring, track, onClose }) {
   // Seed from the app theme (dark app → dark readout for night rows), then let
   // the rower flip it with the on-screen toggle — at arm's length in changing
   // light they may want the opposite of the app chrome.
@@ -33,6 +37,18 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
   // readout layout); the rotate button toggles it. The CSS layout follows the
   // real orientation, so locking portrait re-flows the numbers above the graph.
   const [orientation, setOrientation] = useState('landscape');
+  // The graph panel doubles as a course-down navigation map — the rower faces
+  // the stern, so the map steers for them (see NavMap). Map by default; the
+  // last choice sticks across sessions so the readout opens the way they row.
+  const [panel, setPanel] = useState(() => {
+    try { return localStorage.getItem(PANEL_KEY) === 'graph' ? 'graph' : 'map'; }
+    catch { return 'map'; }
+  });
+  const togglePanel = () => setPanel((p) => {
+    const next = p === 'graph' ? 'map' : 'graph';
+    try { localStorage.setItem(PANEL_KEY, next); } catch { /* private mode */ }
+    return next;
+  });
   const c = THEMES[theme];
   const rootRef = useRef(null);
 
@@ -170,10 +186,74 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
   // Free speed as a signed seconds-per-2k string: "+1.2 s" / "−0.4 s".
   const fmtFree = (s) => (s >= 0 ? '+' : '−') + Math.abs(s).toFixed(1) + ' s';
 
+  // The four metric groups, composed differently per panel: graph mode puts
+  // split + SPM on a full-width top row; map mode packs all four in a grid
+  // beside a narrow full-height map (the river is course-down, i.e. vertical —
+  // a tall sliver shows the river, and any extra width only adds shoreline
+  // streets at the cost of number size).
+  const splitMetric = (
+    <div className="bigscreen-metric">
+      <div className="bigscreen-value bigscreen-split" style={{ color: c.accent }}>{splitText}</div>
+      <div className="bigscreen-label" style={{ color: c.muted }}>/500m</div>
+    </div>
+  );
+  const spmMetric = (
+    <div className="bigscreen-metric">
+      <div className="bigscreen-value bigscreen-spm">{strokeRate || '—'}</div>
+      <div className="bigscreen-label" style={{ color: c.muted }}>spm</div>
+    </div>
+  );
+  const freeSpeedMetric = (
+    <div className="bigscreen-metric">
+      <div
+        className="bigscreen-value bigscreen-freespeed"
+        style={{ color: freeSpeedSeconds == null ? c.muted : freeSpeedSeconds > 0.5 ? c.warn : c.good }}
+      >
+        {freeSpeedSeconds == null ? '—' : fmtFree(freeSpeedSeconds)}
+      </div>
+      <div className="bigscreen-label" style={{ color: c.muted }}>untapped / 2k</div>
+      {avgFreeSpeedSeconds != null && (
+        <div
+          className="bigscreen-value bigscreen-freespeed bigscreen-freespeed-avg"
+          style={{ color: avgFreeSpeedSeconds > 0.5 ? c.warn : c.good }}
+        >
+          {fmtFree(avgFreeSpeedSeconds)}
+          {' '}
+          <span className="bigscreen-delta-cap" style={{ color: c.muted }}>avg</span>
+        </div>
+      )}
+    </div>
+  );
+  // Distance — long-press to start a new piece (resets the free-speed avg).
+  const distanceMetric = (
+    <div className="bigscreen-metric">
+      <div
+        className="bigscreen-distance"
+        onPointerDown={beginPieceHold}
+        onPointerUp={cancelPieceHold}
+        onPointerLeave={cancelPieceHold}
+        onPointerCancel={cancelPieceHold}
+        onContextMenu={(e) => e.preventDefault()}
+        style={{ cursor: 'pointer', userSelect: 'none', touchAction: 'none' }}
+        title="Hold to reset the piece"
+      >
+        <div className="bigscreen-distance-piece" style={{ color: pieceFlash ? c.good : c.fg }}>
+          {Math.round(pieceDistance || 0).toLocaleString()} m
+          {' '}
+          <span className="bigscreen-delta-cap" style={{ color: c.muted }}>piece · hold to reset</span>
+        </div>
+        <div className="bigscreen-distance-total" style={{ color: c.muted }}>
+          {Math.round(sessionDistance || 0).toLocaleString()} m{' '}
+          <span className="bigscreen-delta-cap">total</span>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <div
       ref={rootRef}
-      className={`bigscreen theme-${theme}`}
+      className={`bigscreen theme-${theme}${panel === 'map' ? ' panel-map' : ''}`}
       style={{ background: c.bg, color: c.fg }}
     >
       <div className="bigscreen-controls">
@@ -187,6 +267,14 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
         </button>
         <button
           className="bigscreen-ctrl"
+          onClick={togglePanel}
+          aria-label={panel === 'graph' ? 'Show navigation map' : 'Show stroke profile'}
+          title={panel === 'graph' ? 'Navigation map' : 'Stroke profile'}
+        >
+          {panel === 'graph' ? '⌖' : '∿'}
+        </button>
+        <button
+          className="bigscreen-ctrl"
           onClick={() => setTheme((t) => (t === 'sun' ? 'dark' : 'sun'))}
           aria-label="Toggle day/night"
         >
@@ -197,69 +285,28 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
         </button>
       </div>
 
-      {/* Split (left) and SPM (right) span the full width up top — the two big
-          numbers the rower steers by. */}
-      <div className="bigscreen-toprow">
-        <div className="bigscreen-metric">
-          <div className="bigscreen-value bigscreen-split" style={{ color: c.accent }}>{splitText}</div>
-          <div className="bigscreen-label" style={{ color: c.muted }}>/500m</div>
+      {/* Graph mode: split (left) and SPM (right) span the full width up top —
+          the two big numbers the rower steers by. Map mode skips the top row
+          so the map gets that height too. */}
+      {panel !== 'map' && (
+        <div className="bigscreen-toprow">
+          {splitMetric}
+          {spmMetric}
         </div>
-        <div className="bigscreen-metric">
-          <div className="bigscreen-value bigscreen-spm">{strokeRate || '—'}</div>
-          <div className="bigscreen-label" style={{ color: c.muted }}>spm</div>
-        </div>
-      </div>
+      )}
 
       <div className="bigscreen-body">
         <div className="bigscreen-metrics">
-          {/* Free speed, with the piece average the same size beneath it. */}
-          <div className="bigscreen-metric">
-            <div
-              className="bigscreen-value bigscreen-freespeed"
-              style={{ color: freeSpeedSeconds == null ? c.muted : freeSpeedSeconds > 0.5 ? c.warn : c.good }}
-            >
-              {freeSpeedSeconds == null ? '—' : fmtFree(freeSpeedSeconds)}
-            </div>
-            <div className="bigscreen-label" style={{ color: c.muted }}>untapped / 2k</div>
-            {avgFreeSpeedSeconds != null && (
-              <div
-                className="bigscreen-value bigscreen-freespeed bigscreen-freespeed-avg"
-                style={{ color: avgFreeSpeedSeconds > 0.5 ? c.warn : c.good }}
-              >
-                {fmtFree(avgFreeSpeedSeconds)}
-                {' '}
-                <span className="bigscreen-delta-cap" style={{ color: c.muted }}>avg</span>
-              </div>
-            )}
-          </div>
-
-          {/* Distance — long-press to start a new piece (resets the free-speed avg). */}
-          <div className="bigscreen-metric">
-            <div
-              className="bigscreen-distance"
-              onPointerDown={beginPieceHold}
-              onPointerUp={cancelPieceHold}
-              onPointerLeave={cancelPieceHold}
-              onPointerCancel={cancelPieceHold}
-              onContextMenu={(e) => e.preventDefault()}
-              style={{ cursor: 'pointer', userSelect: 'none', touchAction: 'none' }}
-              title="Hold to reset the piece"
-            >
-              <div className="bigscreen-distance-piece" style={{ color: pieceFlash ? c.good : c.fg }}>
-                {Math.round(pieceDistance || 0).toLocaleString()} m
-                {' '}
-                <span className="bigscreen-delta-cap" style={{ color: c.muted }}>piece · hold to reset</span>
-              </div>
-              <div className="bigscreen-distance-total" style={{ color: c.muted }}>
-                {Math.round(sessionDistance || 0).toLocaleString()} m{' '}
-                <span className="bigscreen-delta-cap">total</span>
-              </div>
-            </div>
-          </div>
+          {panel === 'map' && splitMetric}
+          {panel === 'map' && spmMetric}
+          {freeSpeedMetric}
+          {distanceMetric}
         </div>
 
         <div className="bigscreen-graph">
-          <Line data={bigData} options={bigOptions} />
+          {panel === 'map'
+            ? <NavMap track={track || []} accent={c.accent} trackColor={c.last} />
+            : <Line data={bigData} options={bigOptions} />}
         </div>
       </div>
     </div>

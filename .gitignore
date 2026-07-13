@@ -28,3 +28,4 @@ npm-install.log
 .vercel
 .cert
 .claude/
+scripts/water-cache.json

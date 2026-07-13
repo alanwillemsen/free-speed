@@ -50,17 +50,26 @@ export function resample(times, values, n) {
   return out;
 }
 
-export function subtractGravity(accelIncGravity, beta, gamma) {
+// Gravity vector in the device frame from the orientation angles — the same
+// model subtractGravity uses. Fallback for attitude tracking when the device
+// doesn't report both acceleration variants.
+export function gravityFromAngles(beta, gamma) {
   const G = 9.81;
   const betaRad = (beta ?? 0) * Math.PI / 180;
   const gammaRad = (gamma ?? 0) * Math.PI / 180;
-  const gx = G * Math.sin(gammaRad);
-  const gy = G * Math.sin(betaRad) * Math.cos(gammaRad);
-  const gz = G * Math.cos(betaRad) * Math.cos(gammaRad);
   return {
-    x: (accelIncGravity.x ?? 0) - gx,
-    y: (accelIncGravity.y ?? 0) - gy,
-    z: (accelIncGravity.z ?? 0) - gz,
+    x: G * Math.sin(gammaRad),
+    y: G * Math.sin(betaRad) * Math.cos(gammaRad),
+    z: G * Math.cos(betaRad) * Math.cos(gammaRad),
+  };
+}
+
+export function subtractGravity(accelIncGravity, beta, gamma) {
+  const g = gravityFromAngles(beta, gamma);
+  return {
+    x: (accelIncGravity.x ?? 0) - g.x,
+    y: (accelIncGravity.y ?? 0) - g.y,
+    z: (accelIncGravity.z ?? 0) - g.z,
   };
 }
 
@@ -223,6 +232,62 @@ export function freeSpeedSecondsFor(curve) {
   return null;
 }
 
+// --- Boat attitude (roll / pitch) tracking ---
+// Angles come from the gravity vector (the device fusion's estimate when both
+// acceleration variants are present: accelIncludingGravity − linearAccel),
+// expressed against the boat frame: pitch tilts gravity toward the surge axis,
+// roll toward the sway axis (gravity × surge). Strokes are stamped with the
+// p5–p95 swing of each, so the sign conventions cancel out. Validated against a
+// real session: uncorrelated with the surge signal (r ≈ −0.07), so this reads
+// boat attitude, not stroke acceleration.
+const ATT_LP_ALPHA = 0.18;    // ~2 Hz low-pass at ~60 Hz — kills mount vibration
+const ATT_REF_ALPHA = 0.0006; // ~30 s reference frame for the sway axis
+
+function updateAttitude(proc, gravity, now) {
+  const att = proc.att;
+  if (!att.gLP) {
+    att.gLP = { ...gravity };
+    att.gSlow = { ...gravity };
+    return;
+  }
+  att.gLP.x += ATT_LP_ALPHA * (gravity.x - att.gLP.x);
+  att.gLP.y += ATT_LP_ALPHA * (gravity.y - att.gLP.y);
+  att.gLP.z += ATT_LP_ALPHA * (gravity.z - att.gLP.z);
+  att.gSlow.x += ATT_REF_ALPHA * (gravity.x - att.gSlow.x);
+  att.gSlow.y += ATT_REF_ALPHA * (gravity.y - att.gSlow.y);
+  att.gSlow.z += ATT_REF_ALPHA * (gravity.z - att.gSlow.z);
+
+  const d = proc.direction;
+  const gs = att.gSlow;
+  let wx = gs.y * d.z - gs.z * d.y;
+  let wy = gs.z * d.x - gs.x * d.z;
+  let wz = gs.x * d.y - gs.y * d.x;
+  const wm = Math.hypot(wx, wy, wz);
+  const g = att.gLP;
+  const gm = Math.hypot(g.x, g.y, g.z);
+  if (wm < 1e-6 || gm < 1e-6) return;
+  wx /= wm; wy /= wm; wz /= wm;
+  const clamp = (v) => Math.max(-1, Math.min(1, v));
+  const pitch = Math.asin(clamp((g.x * d.x + g.y * d.y + g.z * d.z) / gm)) * 180 / Math.PI;
+  const roll = Math.asin(clamp((g.x * wx + g.y * wy + g.z * wz) / gm)) * 180 / Math.PI;
+  att.buf.push({ time: now, roll, pitch });
+}
+
+// p5–p95 swing of roll and pitch over a stroke's samples, or null when the
+// stroke has too few attitude samples to be meaningful.
+function strokeAttitudeSwing(buf, t0, t1) {
+  const roll = [], pitch = [];
+  for (const s of buf) {
+    if (s.time >= t0 && s.time <= t1) { roll.push(s.roll); pitch.push(s.pitch); }
+  }
+  if (roll.length < 10) return null;
+  const swing = (vals) => {
+    vals.sort((a, b) => a - b);
+    return vals[Math.floor(vals.length * 0.95)] - vals[Math.floor(vals.length * 0.05)];
+  };
+  return { roll: swing(roll), pitch: swing(pitch) };
+}
+
 // --- Processing engine ---
 
 // A fresh processing pipeline. `startTime` null → set from the first sample, so
@@ -248,6 +313,8 @@ export function makeProc(startTime) {
     direction: { x: 0, y: 1, z: 0 },
     calibration: { startTime, samples: { x: [], y: [], z: [] }, done: false },
     orient: { window: [], lastEval: 0, pending: null, pendingSince: 0 },
+    // Boat attitude tracking (roll/pitch from the gravity vector, when fed).
+    att: { gLP: null, gSlow: null, buf: [] },
     // Set true by feedSample on a remount snap so the caller can re-send the new
     // direction to a linked coach. The caller clears it.
     remounted: false,
@@ -260,7 +327,9 @@ export function makeProc(startTime) {
 // recent GPS-speed window (in the same time domain as `now`). `allowWithoutGps`
 // records strokes even when no GPS is present (replay / coach-fed data); live
 // capture passes false so GPS is required to record.
-export function feedSample(proc, accelValues, now, gpsSpeeds, { allowWithoutGps = false } = {}) {
+// `gravity` (optional vector) feeds roll/pitch tracking — pass the device's
+// gravity estimate (accelIncludingGravity − linearAccel) when available.
+export function feedSample(proc, accelValues, now, gpsSpeeds, { allowWithoutGps = false, gravity = null } = {}) {
   // --- Auto-orientation calibration ---
   if (!proc.calibration.done) {
     proc.calibration.samples.x.push(accelValues.x ?? 0);
@@ -282,6 +351,8 @@ export function feedSample(proc, accelValues, now, gpsSpeeds, { allowWithoutGps 
   }
 
   proc.lastSampleTime = now;
+
+  if (gravity) updateAttitude(proc, gravity, now);
 
   // --- Continuous orientation tracking ---
   const ori = proc.orient;
@@ -393,8 +464,16 @@ export function feedSample(proc, accelValues, now, gpsSpeeds, { allowWithoutGps 
           // only when GPS-anchored; null otherwise, so no split is shown.
           const gpsSpeed = proc.hasGPS ? avgSpeed : null;
           const freeSec = proc.hasGPS ? freeSpeedSecondsFor(curve) : null;
+          // Boat attitude over this stroke: p5–p95 roll/pitch swing (degrees).
+          // Roll swing is the balance/steadiness read; pitch is mostly the
+          // systematic crew-mass movement. Null when no gravity data was fed.
+          const attSwing = strokeAttitudeSwing(proc.att.buf, startTime, now);
           // startTime/time bound the stroke for video-sync (which phase is live).
-          newStroke = { time: now, startTime, curve, avgSpeed, gpsSpeed, spm: proc.strokeRate, freeSec };
+          newStroke = {
+            time: now, startTime, curve, avgSpeed, gpsSpeed, spm: proc.strokeRate, freeSec,
+            rollDeg: attSwing ? attSwing.roll : null,
+            pitchDeg: attSwing ? attSwing.pitch : null,
+          };
           // Keep the full stroke list (the post-session inspector / slider needs
           // every stroke), but average only the most recent window so the live
           // readout reflects current form, not the whole session including warm-up.
@@ -414,6 +493,7 @@ export function feedSample(proc, accelValues, now, gpsSpeeds, { allowWithoutGps 
     proc.lastBoundaryTime = now;
     const cutoff = now - 5000;
     proc.buffer = proc.buffer.filter(s => s.time > cutoff);
+    proc.att.buf = proc.att.buf.filter(s => s.time > cutoff);
   }
 
   return newStroke;
@@ -438,27 +518,37 @@ export function deriveStrokes(recording, { allowWithoutGps = true } = {}) {
   if (!recording || !recording.motion || recording.motion.length === 0) return [];
   const proc = makeProc(recording.motion[0]?.t ?? 0);
   let orientation = { beta: 0, gamma: 0 };
+  let orientationSeen = false;
   let gps = [];
 
   for (const ev of buildReplayEvents(recording)) {
     if (ev.k === 'o') {
-      if (ev.d.beta != null) orientation = { beta: ev.d.beta, gamma: ev.d.gamma };
+      if (ev.d.beta != null) { orientation = { beta: ev.d.beta, gamma: ev.d.gamma }; orientationSeen = true; }
     } else if (ev.k === 'g') {
       gps.push({ time: ev.t, speed: ev.d.speed });
       const cutoff = ev.t - 30000;
       gps = gps.filter(s => s.time > cutoff);
     } else {
       let accelValues;
+      let gravity = null;
       if (ev.d.ax != null) {
         accelValues = { x: ev.d.ax, y: ev.d.ay, z: ev.d.az };
+        // Best attitude source: the fusion's own gravity estimate (axg − ax);
+        // fall back to the recorded orientation angles when axg is absent.
+        if (ev.d.axg != null) {
+          gravity = { x: ev.d.axg - ev.d.ax, y: ev.d.ayg - ev.d.ay, z: ev.d.azg - ev.d.az };
+        } else if (orientationSeen) {
+          gravity = gravityFromAngles(orientation.beta, orientation.gamma);
+        }
       } else if (ev.d.axg != null) {
         accelValues = subtractGravity(
           { x: ev.d.axg, y: ev.d.ayg, z: ev.d.azg }, orientation.beta, orientation.gamma
         );
+        if (orientationSeen) gravity = gravityFromAngles(orientation.beta, orientation.gamma);
       } else {
         continue;
       }
-      feedSample(proc, accelValues, ev.t, gps, { allowWithoutGps });
+      feedSample(proc, accelValues, ev.t, gps, { allowWithoutGps, gravity });
     }
   }
   return proc.strokes;

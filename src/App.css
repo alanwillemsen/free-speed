@@ -1572,6 +1572,96 @@ body {
   box-sizing: border-box;
 }
 
+/* Course-down navigation map (NavMap) in the graph slot. Leaflet can't rotate,
+   so the map lives on an oversized square "rotor" (side = the wrapper's
+   diagonal) that a CSS transform spins; the wrapper clips the overhang. */
+.bignav {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 10px;
+}
+
+.bignav-rotor {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 0;
+  /* Glide between fixes (~1/s); linear so it reads as steady motion, and it
+     pairs with the map's own linear panTo of the same duration. */
+  transition: transform 0.95s linear;
+  will-change: transform;
+}
+
+.bignav-marker {
+  background: none;
+  border: none;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
+}
+/* The rotating wrapper must be exactly the icon's declared 30×30 box — an
+   inline SVG's baseline gap would grow it and shift the rotation center off
+   the marker anchor, drawing the chevron beside the ray instead of on it. */
+.bignav-marker-rot {
+  width: 30px;
+  height: 30px;
+}
+.bignav-marker-rot svg {
+  display: block;
+}
+
+.bignav-wait {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+  font-size: clamp(1.2rem, 4vmin, 2rem);
+  font-weight: 700;
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.bignav-zoom {
+  position: absolute;
+  bottom: 10px;
+  left: 10px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+/* Solid backing so the buttons stay legible over map tiles — the corner
+   controls too, since the full-height map runs underneath them in map mode. */
+.bignav-zoom .bigscreen-ctrl,
+.bigscreen.panel-map .bigscreen-controls .bigscreen-ctrl {
+  opacity: 0.85;
+}
+.bigscreen.theme-sun .bignav-zoom .bigscreen-ctrl,
+.bigscreen.theme-sun.panel-map .bigscreen-controls .bigscreen-ctrl { background: #ffffff; }
+.bigscreen.theme-dark .bignav-zoom .bigscreen-ctrl,
+.bigscreen.theme-dark.panel-map .bigscreen-controls .bigscreen-ctrl { background: #000000; }
+
+.bignav-attrib {
+  position: absolute;
+  bottom: 2px;
+  right: 8px;
+  z-index: 2;
+  font-size: 0.7rem;
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+/* Night theme: same dark-basemap inversion as the session map, plus a black
+   backdrop behind unloaded tiles. */
+.bigscreen.theme-dark .bignav .leaflet-container {
+  background: #000000;
+}
+.bigscreen.theme-dark .bignav .leaflet-tile-pane {
+  filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(0.9) saturate(0.6);
+}
+
 /* Landscape: split + SPM span the full width up top (big), then the remaining
    numbers sit on the left of a shorter graph. Height binds, so size in vh. */
 @media (orientation: landscape) {
@@ -1597,6 +1687,28 @@ body {
   .bigscreen-distance-piece { font-size: clamp(2rem, 7.5vh, 5rem); }
   .bigscreen-distance-total { font-size: clamp(1.3rem, 4.5vh, 3rem); }
   .bigscreen-graph { padding: 1vh 3vw 3vh 1vw; }
+
+  /* Map mode: no top row — the four numbers sit in a 2×2 grid at near
+     graph-mode size, and the map is a narrow full-height band. The river is
+     course-down (vertical), so a tall sliver of map is all river: the
+     shoreline streets either side carry no steering information and are
+     cropped in favour of legible numbers. */
+  .bigscreen.panel-map .bigscreen-metrics {
+    flex: 1 1 auto;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-content: space-evenly;
+    gap: 0;
+    padding: calc(env(safe-area-inset-top) + 0.5rem) 0 1vh 4vw;
+    box-sizing: border-box;
+  }
+  .bigscreen.panel-map .bigscreen-metric { flex: 0 0 50%; box-sizing: border-box; padding-right: 1vw; }
+  .bigscreen.panel-map .bigscreen-split,
+  .bigscreen.panel-map .bigscreen-spm { font-size: clamp(2.4rem, 17vh, 9rem); }
+  .bigscreen.panel-map .bigscreen-graph { flex: 0 0 42%; padding: 1vh 1vw 1vh 0.5vw; }
+  /* The buttons ride the map's right edge (croppable shore side) as a column,
+     instead of a top row blotting out the water the boat is rowing into. */
+  .bigscreen.panel-map .bigscreen-controls { flex-direction: column; }
 }
 
 /* Portrait: split + SPM span the top, big; free speed + distance side by side
@@ -1626,6 +1738,18 @@ body {
   .bigscreen-distance-piece { font-size: clamp(1.8rem, 7vw, 4rem); }
   .bigscreen-distance-total { font-size: clamp(1.2rem, 4.5vw, 2.6rem); }
   .bigscreen-graph { width: 100%; padding: 1vh 3vw 4vh; }
+
+  /* Map mode: no top row — the four numbers pack into a 2×2 grid up top and
+     the map takes all the height below (portrait is already river-shaped). */
+  .bigscreen.panel-map .bigscreen-metrics {
+    flex-wrap: wrap;
+    row-gap: 1.5vh;
+    padding-top: calc(env(safe-area-inset-top) + 3.4rem);
+  }
+  .bigscreen.panel-map .bigscreen-metric { flex: 0 0 42%; }
+  .bigscreen.panel-map .bigscreen-split,
+  .bigscreen.panel-map .bigscreen-spm { font-size: clamp(2rem, 11vw, 5rem); }
+  .bigscreen.panel-map .bigscreen-graph { padding: 1vh 2vw 2vh; }
 }
 
 /* Two-thumb range slider (touch-friendly stroke-range selector). Two native
@@ -1756,6 +1880,79 @@ body {
   font-size: 0.8rem;
   color: #10b981;
   flex-wrap: wrap;
+}
+
+/* --- Session map (GPS track + boat position/direction) --- */
+
+.live-map {
+  position: relative;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+
+.live-map-canvas {
+  height: 280px;
+  width: 100%;
+  /* Leaflet's panes default to z-index up to 700; keep them under the app's
+     overlays (big screen, camera) which sit on much higher stacking contexts. */
+  z-index: 0;
+}
+
+.live-map-label {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 1000; /* above Leaflet panes/controls */
+  padding: 0.25rem 0.6rem;
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  font-size: 0.78rem;
+  font-weight: 600;
+  box-shadow: 0 1px 4px var(--shadow);
+  pointer-events: none;
+  max-width: 70%;
+}
+
+.live-map-recenter {
+  position: absolute;
+  bottom: 24px;
+  right: 10px;
+  z-index: 1000;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--accent);
+  font-size: 1.35rem;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 2px 6px var(--shadow);
+}
+
+.track-map-boat {
+  background: none;
+  border: none;
+}
+
+.track-map-boat-rot {
+  width: 30px;
+  height: 30px;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
+}
+
+/* Dark theme: invert the OSM tiles into a dark basemap; markers and the track
+   live in other panes so they keep their true colors. */
+html[data-theme='dark'] .live-map .leaflet-tile-pane {
+  filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(0.9) saturate(0.6);
+}
+
+html[data-theme='dark'] .live-map .leaflet-control-attribution,
+html[data-theme='dark'] .live-map .leaflet-control-zoom a {
+  background: var(--surface);
+  color: var(--text-muted);
 }
 
 .live-axis-config {
@@ -2289,7 +2486,9 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 /* Shutter on the right edge, vertically centred — the natural right-thumb arc
-   when the phone is held two-handed in landscape (matches phone camera apps). */
+   when the phone is held two-handed in landscape (matches phone camera apps).
+   Zoom +/− flank the shutter in the same column so one right thumb reaches
+   record, stop, and zoom without regripping. */
 .live-camera-controls {
   position: absolute;
   top: 50%;
@@ -2326,6 +2525,30 @@ body {
   height: 1.7rem;
   border-radius: 6px;
   background: var(--danger);
+}
+.live-camera-zoom {
+  width: 3.4rem;
+  height: 3.4rem;
+  border-radius: 999px;
+  border: 2px solid rgba(255, 255, 255, 0.75);
+  background: rgba(20, 22, 32, 0.6);
+  color: #e5e7eb; /* always over the dark camera feed, regardless of theme */
+  font-size: 1.6rem;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.live-camera-zoom:disabled { opacity: 0.35; }
+.live-camera-zoom-level {
+  background: rgba(15, 17, 26, 0.6);
+  color: #e5e7eb;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
 }
 
 /* --- Video Analysis page --- */
@@ -2998,3 +3221,172 @@ body {
 }
 .app-drawer-toggle[data-on='true'] { background: var(--accent); }
 .app-drawer-toggle[data-on='true'] > span { transform: translateX(16px); }
+
+/* --- Course marks editor (#course): user-placed buoys, hazards, end lines --- */
+
+.app-shell-body > .course-page {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.course-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.course-toolbar-spacer { flex: 1; }
+
+.course-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.course-tool span { display: inline-flex; }
+.course-tool svg { display: block; }
+
+.course-tool.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.course-map-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 320px;
+  display: flex;
+}
+
+.course-map {
+  flex: 1;
+  width: 100%;
+  z-index: 0; /* keep Leaflet panes under the app drawer/overlays */
+  cursor: crosshair;
+}
+
+.course-hint {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  padding: 0.35rem 0.8rem;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  font-size: 0.82rem;
+  font-weight: 600;
+  box-shadow: 0 2px 8px var(--shadow);
+  pointer-events: none;
+  white-space: nowrap;
+  max-width: 92%;
+}
+
+.course-toast {
+  position: absolute;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1001;
+  padding: 0.45rem 0.9rem;
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  font-size: 0.85rem;
+  box-shadow: 0 3px 10px var(--shadow);
+  pointer-events: none;
+}
+
+.course-mark-panel {
+  position: absolute;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 3px 10px var(--shadow);
+  max-width: 94%;
+}
+
+.course-mark-panel-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.course-mark-panel-coords {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.course-mark-delete {
+  padding: 0.3rem 0.7rem;
+  border-radius: 6px;
+  border: 1px solid #dc2626;
+  background: transparent;
+  color: #dc2626;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.course-mark-close {
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+  cursor: pointer;
+  padding: 0.2rem;
+}
+
+/* Mark icons (shared by editor, live map, and nav map). */
+.course-mark {
+  background: none;
+  border: none;
+}
+.course-mark svg {
+  display: block;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
+}
+.course-mark.selected svg {
+  filter: drop-shadow(0 0 5px var(--accent)) drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
+}
+
+/* Dark theme: same inverted basemap treatment as the live map. */
+html[data-theme='dark'] .course-map .leaflet-tile-pane {
+  filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(0.9) saturate(0.6);
+}
+html[data-theme='dark'] .course-map .leaflet-control-attribution,
+html[data-theme='dark'] .course-map .leaflet-control-zoom a {
+  background: var(--surface);
+  color: var(--text-muted);
+}
