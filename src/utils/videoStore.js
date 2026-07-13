@@ -15,6 +15,7 @@ const META_STORE = 'meta';      // key 'header': { mime, startedAt, video anchor
 const HANDOFF_STORE = 'handoff'; // key 'bundle': { blob, meta } parked for the analyzer
 const HEADER_KEY = 'header';
 const BUNDLE_KEY = 'bundle';
+const CURRENT_KEY = 'current'; // the bundle open in the analyzer, for reload recovery
 
 let dbPromise = null;
 
@@ -122,4 +123,27 @@ export async function takeHandoff() {
     await done(t);
   } catch { /* ignore */ }
   return rec;
+}
+
+// --- Analyzer reload recovery (the bundle currently open, NOT one-shot) ---
+// Mobile browsers reap heavy tabs under memory pressure; keeping the open
+// bundle here lets the analyzer restore it after the reload instead of dumping
+// the coach back on the load screen. Blobs read from IndexedDB are disk-backed,
+// so this holds no memory while the app runs.
+
+export async function putCurrent(blob) {
+  const db = await openDB();
+  const t = db.transaction([HANDOFF_STORE], 'readwrite');
+  t.objectStore(HANDOFF_STORE).put({ blob }, CURRENT_KEY);
+  return done(t);
+}
+
+export async function getCurrent() {
+  let db;
+  try { db = await openDB(); } catch { return null; }
+  return new Promise((resolve) => {
+    const req = db.transaction([HANDOFF_STORE], 'readonly').objectStore(HANDOFF_STORE).get(CURRENT_KEY);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => resolve(null);
+  });
 }

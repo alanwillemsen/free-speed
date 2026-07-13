@@ -21,14 +21,16 @@ const RACE_DISTANCE = 2000;
 function App() {
   const pageFromHash = () => {
     const h = window.location.hash;
-    if (h === '#live' || h.startsWith('#live?')) return 'live';
+    // Shared-curve links (#s=...) open in the calculator, which decodes them.
+    if (h === '#calculator' || h.startsWith('#s=')) return 'calculator';
     if (h === '#oar' || h.startsWith('#oar?')) return 'oar';
     if (h === '#analyze' || h.startsWith('#analyze?')) return 'analyze';
     if (h === '#tradeoffs') return 'tradeoffs';
     if (h === '#course' || h.startsWith('#course?')) return 'course';
-    return 'calculator';
+    return 'live'; // home page (covers '' and legacy #live links)
   };
   const [activePage, setActivePage] = useState(pageFromHash);
+
 
   useEffect(() => {
     const onHash = () => setActivePage(pageFromHash());
@@ -120,9 +122,10 @@ function App() {
   };
 
   const handleSave = (name, desc) => {
-    if (!viewingCurve || viewingCurve.isExample) {
-      // Save as a new entry (also covers: saving a modified example as a new curve)
-      const resolvedName = (name || 'Untitled') === (viewingCurve?.name ?? '')
+    if (!viewingCurve || viewingCurve.isExample || viewingCurve.isShared) {
+      // Save as a new entry (also covers: saving a modified example as a new
+      // curve, and saving a share-link curve into this browser).
+      const resolvedName = viewingCurve?.isExample && (name || 'Untitled') === viewingCurve.name
         ? `${name} (copy)`
         : (name || 'Untitled');
       const entry = {
@@ -226,30 +229,54 @@ function App() {
             a smoother stroke — same average speed, less energy — translates to a faster finish time.
           </p>
 
-          <CurveHeader
-            key={viewingCurve?.id ?? 'new'}
-            entry={viewingCurve}
-            isNew={!viewingCurve}
-            isDirty={isDirty}
-            initialName={!sharedConsumed.current ? sharedOnLoad?.name : undefined}
-            initialDesc={!sharedConsumed.current ? sharedOnLoad?.desc : undefined}
-            onSave={handleSave}
-            onUpdate={handleUpdateCurve}
-            onDirty={() => setIsDirty(true)}
-          />
+          {/* Wide screens: title/description with the results under it in a
+              left column that matches the chart's height, chart to the right.
+              Narrow screens: header → chart → results, stacked. */}
+          <div className="calc-columns">
+            <div className="calc-side-col">
+              <CurveHeader
+                key={viewingCurve?.id ?? 'new'}
+                entry={viewingCurve}
+                isNew={!viewingCurve}
+                isDirty={isDirty}
+                initialName={!sharedConsumed.current ? sharedOnLoad?.name : undefined}
+                initialDesc={!sharedConsumed.current ? sharedOnLoad?.desc : undefined}
+                onSave={handleSave}
+                onUpdate={handleUpdateCurve}
+                onDirty={() => setIsDirty(true)}
+              />
 
-          <SpeedChart
-            curveA={curveA}
-            curveB={curveBNormalized}
-            onCurveBChange={handleCurveBChange}
-            onReset={handleReset}
-            energyPenaltyPercent={penalty.percentPenalty}
-            strokeRate={strokeRate}
-            onStrokeRateChange={setStrokeRate}
-            isNewCurve={!viewingCurve}
-          />
+              <aside className="calc-results-col">
+                <BoatVisualization
+                  show="metrics"
+                  timeDifference={estimate.timeDifference}
+                  avgVelocityA={targetAvgSpeed}
+                  raceTime={raceTime}
+                  onRaceTimeChange={setRaceTime}
+                  estimatedFinishTime={estimate.finishTime}
+                  energyPenaltyPercent={penalty.percentPenalty}
+                />
+              </aside>
+            </div>
 
+            <div className="calc-chart-col">
+              <SpeedChart
+                curveA={curveA}
+                curveB={curveBNormalized}
+                onCurveBChange={handleCurveBChange}
+                onReset={handleReset}
+                energyPenaltyPercent={penalty.percentPenalty}
+                strokeRate={strokeRate}
+                onStrokeRateChange={setStrokeRate}
+                isNewCurve={!viewingCurve}
+              />
+            </div>
+          </div>
+
+          {/* The race graphic needs the full page width to be readable — the
+              side column only carries the numbers. */}
           <BoatVisualization
+            show="race"
             timeDifference={estimate.timeDifference}
             avgVelocityA={targetAvgSpeed}
             raceTime={raceTime}

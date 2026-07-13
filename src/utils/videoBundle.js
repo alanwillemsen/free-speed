@@ -31,7 +31,74 @@ export async function packBundle(meta, videoBlob) {
   return new Blob([zipped], { type: 'application/zip' });
 }
 
+// Minimal zip directory reader for the store-only fast path. packBundle writes
+// entries uncompressed, so each file's bytes sit contiguously inside the zip
+// and can be sliced straight out of the Blob. Blob.slice is zero-copy and stays
+// disk-backed — where unzipSync would materialise the whole clip in memory,
+// which is enough to get a phone tab reaped mid-playback.
+
+const EOCD_SIG = 0x06054b50; // end of central directory
+const CEN_SIG = 0x02014b50;  // central directory entry
+const LOC_SIG = 0x04034b50;  // local file header
+
+async function view(blob, start, end) {
+  return new DataView(await blob.slice(start, end).arrayBuffer());
+}
+
+async function zipDirectory(zipBlob) {
+  // The EOCD record sits in the last 22 + 65535 (max comment) bytes.
+  const tail = await view(zipBlob, Math.max(0, zipBlob.size - 65557), zipBlob.size);
+  let p = tail.byteLength - 22;
+  while (p >= 0 && tail.getUint32(p, true) !== EOCD_SIG) p--;
+  if (p < 0) throw new Error('no zip directory');
+  const count = tail.getUint16(p + 10, true);
+  const cdSize = tail.getUint32(p + 12, true);
+  const cdOff = tail.getUint32(p + 16, true);
+  if (cdOff === 0xffffffff) throw new Error('zip64 unsupported');
+  const cd = await view(zipBlob, cdOff, cdOff + cdSize);
+  const dec = new TextDecoder();
+  const entries = [];
+  for (let i = 0, q = 0; i < count && q + 46 <= cd.byteLength; i++) {
+    if (cd.getUint32(q, true) !== CEN_SIG) throw new Error('bad directory entry');
+    const nameLen = cd.getUint16(q + 28, true);
+    entries.push({
+      name: dec.decode(new Uint8Array(cd.buffer, cd.byteOffset + q + 46, nameLen)),
+      method: cd.getUint16(q + 10, true),
+      size: cd.getUint32(q + 20, true), // compressed size == stored size for method 0
+      localOff: cd.getUint32(q + 42, true),
+    });
+    q += 46 + nameLen + cd.getUint16(q + 30, true) + cd.getUint16(q + 32, true);
+  }
+  return entries;
+}
+
+async function entrySlice(zipBlob, entry, type) {
+  if (entry.method !== 0 || entry.size === 0xffffffff || entry.localOff === 0xffffffff) {
+    throw new Error('not a stored entry');
+  }
+  // The local header's name/extra lengths can differ from the directory's, so
+  // the data offset has to come from the local header itself.
+  const lh = await view(zipBlob, entry.localOff, entry.localOff + 30);
+  if (lh.getUint32(0, true) !== LOC_SIG) throw new Error('bad local header');
+  const start = entry.localOff + 30 + lh.getUint16(26, true) + lh.getUint16(28, true);
+  return zipBlob.slice(start, start + entry.size, type);
+}
+
 export async function unpackBundle(zipBlob) {
+  // Fast path: slice the (stored) entries out of the blob without ever loading
+  // the video bytes into JS memory.
+  try {
+    const entries = await zipDirectory(zipBlob);
+    const metaEntry = entries.find((e) => e.name === 'strokes.json');
+    const videoEntry = entries.find((e) => e.name.startsWith('video.'));
+    if (metaEntry && videoEntry) {
+      const meta = JSON.parse(await (await entrySlice(zipBlob, metaEntry, 'application/json')).text());
+      const videoBlob = await entrySlice(zipBlob, videoEntry, meta.video?.mime || 'video/webm');
+      return { meta, videoBlob };
+    }
+  } catch { /* re-zipped with compression, zip64, … — take the in-memory path */ }
+
+  // Fallback: full in-memory unzip, for bundles re-zipped with compression.
   const bytes = new Uint8Array(await zipBlob.arrayBuffer());
   const files = unzipSync(bytes);
   const metaBytes = files['strokes.json'];

@@ -9,6 +9,8 @@
    applied by setting data-theme="dark" on <html> (see hooks/useTheme.js).
    Components reference var(--token) only — no raw hex in component rules. */
 :root {
+  /* Native widgets (select popups, scrollbars) follow the app theme. */
+  color-scheme: light;
   --bg: #f5f7fa;
   --surface: #ffffff;
   --surface-2: #f7fafc;
@@ -36,6 +38,7 @@
 }
 
 html[data-theme='dark'] {
+  color-scheme: dark;
   --bg: #0f111a;
   --surface: #161a26;
   --surface-2: #1a2030;
@@ -100,6 +103,65 @@ body {
   text-align: center;
 }
 
+/* Calculator layout. Stacked by default (header → result strip → chart →
+   results); on wide screens the header + results form a left column that
+   stretches to the chart's height, with the chart beside them. */
+.calc-columns {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* On narrow screens the side column dissolves so its children can interleave
+   with the chart (header and strip above it, full results below). */
+.calc-side-col {
+  display: contents;
+}
+
+.calc-chart-col {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+  order: 1;
+}
+
+.calc-results-col {
+  order: 2;
+}
+
+@media (min-width: 1100px) {
+  .calc-columns {
+    flex-direction: row;
+    align-items: stretch;
+  }
+  .calc-side-col {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    flex: 0 0 400px;
+    min-width: 0;
+  }
+  /* Narrow column: a timestamped capture name should fit on its row. */
+  .calc-side-col .curve-header-name {
+    font-size: 1.15rem;
+  }
+  .calc-chart-col {
+    flex: 1 1 auto;
+    order: 0;
+  }
+  /* Results fill the column below the header, matching the chart's height. */
+  .calc-results-col {
+    order: 0;
+    flex: 1 1 auto;
+    display: flex;
+    min-height: 0;
+  }
+  .calc-results-col .boat-visualization {
+    flex: 1;
+  }
+}
+
 .app-content {
   flex: 1;
   display: flex;
@@ -128,6 +190,33 @@ body {
   flex-direction: column;
   overflow-y: auto;
   min-height: 0;
+}
+
+/* Mobile fold bar for the curve list — hidden on desktop. */
+.left-nav-toggle {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.7rem 1rem;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.left-nav-toggle-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.left-nav-toggle-label strong {
+  color: var(--text);
 }
 
 .nav-section-label {
@@ -274,11 +363,17 @@ body {
 .curve-header-top {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.5rem 0.75rem;
+  /* In the narrow side column a long name can't share a row with the save
+     button — let the buttons wrap under it instead of overflowing. */
+  flex-wrap: wrap;
 }
 
 .curve-header-name {
-  flex: 1;
+  /* Full first row — long capture names must not be clipped by the buttons,
+     which wrap onto their own row below. */
+  flex: 1 1 100%;
+  min-width: 0;
   font-size: 1.4rem;
   font-weight: 700;
   color: var(--text);
@@ -749,6 +844,12 @@ body {
   margin-bottom: 2rem;
 }
 
+/* In the side column the panel is the column — tighter, no trailing margin. */
+.calc-results-col .boat-visualization {
+  padding: 1.25rem;
+  margin-bottom: 0;
+}
+
 .boat-visualization h3 {
   font-size: 1.4rem;
   margin-bottom: 0.5rem;
@@ -775,18 +876,12 @@ body {
   color: var(--text-muted);
 }
 
+/* All result numbers read in the plain text color, bold — the red/green
+   coding confused more than it helped. */
 .race-metric-value {
   font-weight: 700;
   font-size: 1rem;
   color: var(--text);
-}
-
-.race-metric-value.worse {
-  color: var(--danger);
-}
-
-.race-metric-value.better {
-  color: var(--success);
 }
 
 .viz-description {
@@ -796,7 +891,7 @@ body {
 }
 
 .distance-diff {
-  color: var(--accent);
+  color: var(--text);
   font-weight: 700;
 }
 
@@ -1253,9 +1348,9 @@ body {
 
 .live-stats {
   display: flex;
-  justify-content: center;
-  gap: 2rem;
-  padding: 0.75rem;
+  justify-content: space-evenly;
+  gap: clamp(0.4rem, 2vw, 2rem);
+  padding: 0.65rem 0.5rem;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
 }
@@ -1267,10 +1362,11 @@ body {
 }
 
 .live-stat-value {
-  font-size: 1.8rem;
+  font-size: clamp(1.15rem, 5vw, 1.8rem);
   font-weight: 700;
   color: var(--text);
   line-height: 1.1;
+  white-space: nowrap;
 }
 
 .live-stat-label {
@@ -1309,12 +1405,18 @@ body {
 }
 
 .live-split-value {
-  font-size: 1.5rem;
+  font-size: clamp(1rem, 4.2vw, 1.5rem);
   font-variant-numeric: tabular-nums;
 }
 
 .live-free-value {
-  font-size: 1.5rem;
+  font-size: clamp(1rem, 4.2vw, 1.5rem);
+  font-variant-numeric: tabular-nums;
+}
+
+/* "176 of 637" while a stroke is inspected — longer than a plain count. */
+.live-stroke-frac {
+  font-size: clamp(1rem, 4.2vw, 1.5rem);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1414,24 +1516,12 @@ body {
   height: 140px;
 }
 
-/* Floating trigger for the outdoor full-screen readout, pinned to the chart. */
-.live-bigscreen-btn {
-  position: absolute;
-  top: 0.6rem;
-  right: 0.6rem;
-  width: 2.2rem;
-  height: 2.2rem;
-  border: none;
-  border-radius: 8px;
-  background: rgba(45, 55, 72, 0.85);
-  color: var(--on-accent);
-  font-size: 1.1rem;
+/* Trigger for the outdoor full-screen readout: a compact square at the end of
+   the panel-tab row (visible from either panel, live mode only). */
+.live-panel-tab-fs {
+  flex: 0 0 2.6rem;
+  font-size: 1.05rem;
   line-height: 1;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 2;
 }
 
 /* --- Outdoor full-screen readout --- */
@@ -1541,11 +1631,6 @@ body {
   white-space: nowrap;
 }
 
-.bigscreen-delta-cap {
-  font-weight: 700;
-  letter-spacing: 0.06em;
-}
-
 /* Distance under the SPM: the resettable piece, then the session total. */
 .bigscreen-distance {
   margin-top: 1.4vh;
@@ -1561,7 +1646,7 @@ body {
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  margin-top: 0.4vh;
+  margin-top: 1vh;
 }
 
 /* The stroke speed profile fills whatever space the numbers don't take. */
@@ -1709,7 +1794,6 @@ button.bignav-course-status {
   .bigscreen-split { font-size: clamp(3rem, 20vh, 13rem); }
   .bigscreen-freespeed { font-size: clamp(2rem, 10vh, 6rem); }
   .bigscreen-delta { font-size: clamp(1.2rem, 4.5vh, 3rem); }
-  .bigscreen-delta-cap { font-size: clamp(0.6rem, 2vh, 1.1rem); }
   .bigscreen-distance-piece { font-size: clamp(2rem, 7.5vh, 5rem); }
   .bigscreen-distance-total { font-size: clamp(1.3rem, 4.5vh, 3rem); }
   .bigscreen-graph { padding: 1vh 3vw 3vh 1vw; }
@@ -1724,11 +1808,11 @@ button.bignav-course-status {
     flex-direction: row;
     flex-wrap: wrap;
     align-content: space-evenly;
-    gap: 0;
+    gap: 0 4vw;
     padding: calc(env(safe-area-inset-top) + 0.5rem) 0 1vh 4vw;
     box-sizing: border-box;
   }
-  .bigscreen.panel-map .bigscreen-metric { flex: 0 0 50%; box-sizing: border-box; padding-right: 1vw; }
+  .bigscreen.panel-map .bigscreen-metric { flex: 0 0 calc(50% - 2vw); box-sizing: border-box; padding-right: 1vw; }
   .bigscreen.panel-map .bigscreen-split,
   .bigscreen.panel-map .bigscreen-spm { font-size: clamp(2.4rem, 17vh, 9rem); }
   .bigscreen.panel-map .bigscreen-graph { flex: 0 0 42%; padding: 1vh 1vw 1vh 0.5vw; }
@@ -1760,7 +1844,6 @@ button.bignav-course-status {
   .bigscreen-split { font-size: clamp(2.6rem, 15vw, 7rem); }
   .bigscreen-freespeed { font-size: clamp(1.9rem, 9.5vw, 4.8rem); }
   .bigscreen-delta { font-size: clamp(1.1rem, 4.5vw, 2.6rem); }
-  .bigscreen-delta-cap { font-size: clamp(0.55rem, 2vw, 1rem); }
   .bigscreen-distance-piece { font-size: clamp(1.8rem, 7vw, 4rem); }
   .bigscreen-distance-total { font-size: clamp(1.2rem, 4.5vw, 2.6rem); }
   .bigscreen-graph { width: 100%; padding: 1vh 3vw 4vh; }
@@ -1873,10 +1956,33 @@ button.bignav-course-status {
   flex-wrap: wrap;
 }
 
+/* Standalone analysis block in the review body (was nested in the timeline). */
 .live-untapped-panel {
-  margin-top: 0.75rem;
-  padding-top: 0.75rem;
+  padding: 0.15rem 0.75rem 0.5rem;
+  background: var(--surface);
   border-top: 1px solid var(--border);
+}
+
+/* Whole stats line doubles as the fold/unfold control for the histogram. */
+.live-untapped-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.45rem 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.live-untapped-chevron {
+  flex-shrink: 0;
+  color: var(--text-faint);
 }
 
 .live-untapped-stats {
@@ -1885,7 +1991,6 @@ button.bignav-course-status {
   gap: 0.4rem 1rem;
   font-size: 0.82rem;
   color: var(--text-muted);
-  margin-bottom: 0.4rem;
 }
 
 .live-untapped-stat strong {
@@ -2063,13 +2168,146 @@ html[data-theme='dark'] .live-map .leaflet-control-zoom a {
   50% { opacity: 0.4; }
 }
 
+/* Primary control bar (Start / Hold-to-stop / Pause): pinned to the bottom of
+   the viewport so it's always reachable without scrolling. Secondary desk
+   actions (replay, download, load) live in .live-actions-secondary, which
+   scrolls normally just above it. */
 .live-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.75rem 1rem calc(1rem + env(safe-area-inset-bottom));
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -2px 8px var(--shadow);
+}
+
+.live-actions-secondary {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
   padding: 0.75rem 1rem 1rem;
   background: var(--surface);
   border-top: 1px solid var(--border);
+}
+
+/* Sticky header: the glanceable stats plus the panel switcher stay on screen
+   while everything else (link panel, guide, banners, panels) scrolls. */
+.live-head {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: var(--surface);
+  box-shadow: 0 1px 4px var(--shadow);
+}
+
+/* Segmented switcher for the middle panel (Stroke · Timeline · Map). */
+.live-panel-tabs {
+  display: flex;
+  gap: 0.3rem;
+  padding: 0.4rem 0.75rem 0.5rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.live-panel-tab {
+  flex: 1;
+  padding: 0.4rem 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: none;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.live-panel-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+.live-panel-tab:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* One panel shows at a time and fills the height between the sticky header
+   and the action bar; the others stay mounted but hidden (the map keeps its
+   view state, charts their data). */
+.live-panels {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.live-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  /* Leaflet panes use z-indexes up to 1000; isolate them so the map can never
+     paint over the sticky header/footer (z-index 30 at page level). */
+  isolation: isolate;
+}
+
+.live-panel[hidden] {
+  display: none;
+}
+
+/* In a panel, the map and the timeline grow to the available height instead
+   of their old fixed strips. */
+.live-panel > .live-map {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  border-top: none;
+}
+
+.live-panel .live-map-canvas {
+  flex: 1;
+  height: auto;
+  min-height: 280px;
+}
+
+/* Review mode's footer: timeline navigator + action row. In normal flow —
+   review scrolls anyway, and pinning it just cramped the panels above. */
+.live-foot {
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+
+.live-foot .live-time-chart {
+  border-top: none;
+}
+
+/* The timeline is the review mode's primary navigator — give it real height
+   (the desk actions that used to eat this space live in the ⋮ menu now). */
+.live-foot .live-time-chart-wrapper {
+  height: clamp(130px, 24vh, 260px);
+}
+
+.live-foot-actions {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+  padding: 0.35rem 0.75rem calc(0.6rem + env(safe-area-inset-bottom));
+}
+
+.live-foot-actions .btn {
+  flex: 1;
+  white-space: nowrap;
+}
+
+.live-foot-actions .live-replay-speed {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
 }
 
 .live-start-btn {
@@ -2172,9 +2410,10 @@ html[data-theme='dark'] .live-map .leaflet-control-zoom a {
 
 .live-replay-speed select {
   padding: 0.4rem 0.5rem;
-  border: 1px solid var(--text-muted);
+  border: 1px solid var(--border-strong);
   border-radius: 8px;
   background: var(--surface);
+  color: var(--text);
   font-size: 0.9rem;
 }
 
@@ -2215,7 +2454,8 @@ html[data-theme='dark'] .live-map .leaflet-control-zoom a {
 }
 
 @media (max-width: 768px) {
-  /* Stack the saved-curves sidebar above the main content on phones. */
+  /* Stack the saved-curves sidebar above the main content on phones, folded
+     behind a one-line bar so it doesn't push the chart off screen. */
   .app-content {
     flex-direction: column;
   }
@@ -2225,7 +2465,20 @@ html[data-theme='dark'] .live-map .leaflet-control-zoom a {
     width: 100%;
     border-right: none;
     border-bottom: 1px solid var(--border);
-    max-height: 40vh;
+  }
+
+  .left-nav-toggle {
+    display: flex;
+  }
+
+  .left-nav-body {
+    display: none;
+  }
+
+  .left-nav.open .left-nav-body {
+    display: block;
+    max-height: 45vh;
+    overflow-y: auto;
   }
 
   .subtitle {

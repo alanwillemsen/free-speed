@@ -40,6 +40,7 @@ ChartJS.register(LinearScale, CategoryScale, PointElement, LineElement, BarEleme
 const UI_UPDATE_MS = 250;
 const SEND_BATCH_MS = 100;        // Batch outgoing samples this often when coach-linked
 const PERSIST_FLUSH_MS = 2000;    // Flush new samples to IndexedDB this often (crash recovery)
+const PANEL_KEY = 'freespeed_live_panel'; // last-viewed middle panel (stroke | timeline | map)
 
 // --- Component ---
 
@@ -114,6 +115,33 @@ function LiveCapture() {
   const [selectedBin, setSelectedBin] = useState(null);
   // Whether the tappable explainer for the "untapped" free-speed stat is open.
   const [showFreeInfo, setShowFreeInfo] = useState(false);
+  // Which main panel is showing: 'stroke' | 'map'. One at a time (the timeline
+  // is not a panel — in review mode it's the always-visible navigator at the
+  // bottom); persisted so a rower who only ever watches the map lands back on it.
+  const [panel, setPanel] = useState(() => {
+    try { return localStorage.getItem(PANEL_KEY) === 'map' ? 'map' : 'stroke'; } catch { return 'stroke'; }
+  });
+  // Re-open the setup panel (role / coach link) from review mode via the ⋮
+  // app-bar menu; setup otherwise only shows before a session exists.
+  const [setupOpen, setSetupOpen] = useState(false);
+  // Review mode's ⋮ overflow menu (download / load / setup).
+  const [menuOpen, setMenuOpen] = useState(false);
+  // The untapped histogram is folded behind its stats line by default — the
+  // timeline needs the vertical space more; remembered across sessions.
+  const [histOpen, setHistOpen] = useState(() => {
+    try { return localStorage.getItem('freespeed_live_hist') === '1'; } catch { return false; }
+  });
+  const toggleHist = () => {
+    setHistOpen((v) => {
+      try { localStorage.setItem('freespeed_live_hist', v ? '0' : '1'); } catch { /* ignore */ }
+      return !v;
+    });
+  };
+  // Brief lock on the start control after a stop: hold-to-stop completes while
+  // the finger is still down, and the button that replaces it must not absorb
+  // the release as an instant restart (which would wipe the session view).
+  const [startLocked, setStartLocked] = useState(false);
+  const startLockTimerRef = useRef(null);
 
   // Processing state lives in refs to avoid stale closures in the 60 Hz handler
   const procRef = useRef(null);
@@ -289,11 +317,13 @@ function LiveCapture() {
       if (ag && ag.x != null) {
         gravity = { x: ag.x - accelValues.x, y: ag.y - accelValues.y, z: ag.z - accelValues.z };
       }
-    } else if (event.accelerationIncludingGravity) {
+    } else if (event.accelerationIncludingGravity && event.accelerationIncludingGravity.x != null) {
       const { beta, gamma } = orientationRef.current;
       accelValues = subtractGravity(event.accelerationIncludingGravity, beta, gamma);
       gravity = gravityFromAngles(beta, gamma);
     } else {
+      // No data in this event (browsers without a sensor still fire the event
+      // with null fields) — null would coerce to 0s and poison the pipeline.
       return;
     }
 
@@ -943,14 +973,19 @@ function LiveCapture() {
     // recording so a follow-up download re-exports it. The teardown below is all
     // null-guarded, so it's safe even though a replay never set up GPS/streaming.
     let replaySource = null;
+    let replayStoppedAt = null; // playhead (recording time) when the replay was stopped
     if (replayRef.current) {
       replayRef.current.cancel();
       replaySource = replayRef.current.recording;
+      replayStoppedAt = replayRef.current.playheadT ?? null;
       recordingRef.current = replaySource;
       replayRef.current = null;
       setLiveReplayActive(false);
     }
     setIsCapturing(false);
+    setStartLocked(true);
+    if (startLockTimerRef.current) clearTimeout(startLockTimerRef.current);
+    startLockTimerRef.current = setTimeout(() => setStartLocked(false), 700);
     // Copy final state from processing refs
     const proc = procRef.current;
     if (proc) {
@@ -996,6 +1031,13 @@ function LiveCapture() {
       setIsReplaying(true);
       setTimeout(() => {
         replayRecording(replaySource);
+        // Land review on the stroke that was playing when the replay stopped
+        // (replayRecording just reset the selection to the whole session).
+        const full = procRef.current;
+        if (replayStoppedAt != null && full && full.strokes.length > 0) {
+          const at = full.strokes.findIndex((s) => s.time >= replayStoppedAt);
+          setSelectedIndex(at === -1 ? full.strokes.length - 1 : at);
+        }
         setIsReplaying(false);
       }, 50);
     }
@@ -1256,6 +1298,7 @@ function LiveCapture() {
     const step = () => {
       if (state.cancelled) return;
       const playT = firstT + (performance.now() - startWall) * speed;
+      state.playheadT = playT; // read by stopCapture to land review on this stroke
       while (idx < events.length && events[idx].t <= playT) {
         applyReplayEvent(events[idx]);
         idx++;
@@ -1773,6 +1816,24 @@ function LiveCapture() {
   const isLive = isCapturing || isWatching;
   const gpsActive = gpsStatus === 'active' || hasGPSAnchoring;
 
+  // --- Mode machine ---
+  // The page serves one job at a time:
+  //   setup  — role + coach link + sensor status; no session running or loaded
+  //   live   — capturing / watching / replaying; glance stats, one panel, stop
+  //   review — a finished (or paused) session; timeline-driven analysis
+  const mode = (isCapturing || (isWatching && !isPaused)) ? 'live'
+    : (strokes.length > 1 || hasRecording) ? 'review'
+    : 'setup';
+
+  // App-bar title says what's happening and as whom: live vs replay vs review,
+  // rower vs coach. Setup keeps the page's plain name.
+  const roleLabel = linkRole === 'coach' ? 'Coach' : 'Rower';
+  const pageTitle = mode === 'live'
+    ? `${liveReplayActive ? 'Replay' : 'Live Capture'} · ${roleLabel}`
+    : mode === 'review'
+      ? `Review · ${roleLabel}`
+      : 'Live Stroke Capture';
+
   // Boat marker for the map: while inspecting a stroke (tap a dot / Prev / Next)
   // the position and direction of travel at the end of that stroke (strokes are
   // stamped at their end); while live, the latest fix. Otherwise just the track.
@@ -1998,8 +2059,19 @@ function LiveCapture() {
         <span className="live-stat-label">spm</span>
       </div>
       <div className="live-stat">
-        <span className="live-stat-value">{strokeCount}</span>
-        <span className="live-stat-label">strokes</span>
+        {individualStroke ? (
+          <>
+            <span className="live-stat-value live-stroke-frac">
+              {selectedIndex + 1} of {strokes.length}
+            </span>
+            <span className="live-stat-label">strokes</span>
+          </>
+        ) : (
+          <>
+            <span className="live-stat-value">{strokeCount}</span>
+            <span className="live-stat-label">strokes</span>
+          </>
+        )}
       </div>
       {(isLive || strokes.length > 0) && (
         <div className="live-stat">
@@ -2043,17 +2115,21 @@ function LiveCapture() {
           )}
         </div>
       )}
-      <div className="live-stat">
-        <span className={`live-stat-value live-gps-value ${gpsActive ? 'gps-active' : ''}`}>
-          {gpsActive ? 'GPS' : gpsStatus === 'requesting' ? '...' : '—'}
-        </span>
-        <span className="live-stat-label">
-          {hasGPSAnchoring
-            ? 'anchored'
-            : gpsStatus === 'active' ? 'waiting'
-            : gpsStatus === 'unavailable' ? 'no gps' : 'gps'}
-        </span>
-      </div>
+      {/* GPS state matters while rowing (is my split real?); in review the
+          data is already whatever it is — free the space for the numbers. */}
+      {mode !== 'review' && (
+        <div className="live-stat">
+          <span className={`live-stat-value live-gps-value ${gpsActive ? 'gps-active' : ''}`}>
+            {gpsActive ? 'GPS' : gpsStatus === 'requesting' ? '...' : '—'}
+          </span>
+          <span className="live-stat-label">
+            {hasGPSAnchoring
+              ? 'anchored'
+              : gpsStatus === 'active' ? 'waiting'
+              : gpsStatus === 'unavailable' ? 'no gps' : 'gps'}
+          </span>
+        </div>
+      )}
     </div>
   );
 
@@ -2085,14 +2161,6 @@ function LiveCapture() {
           </svg>
         </button>
       )}
-      <button
-        className="live-bigscreen-btn"
-        onClick={() => setBigScreen(true)}
-        aria-label="Full-screen display"
-        title="Full-screen display"
-      >
-        {'⛶'}
-      </button>
       {!avgCurve && isLive && calibrationStatus === 'calibrating' && (
         <div className="live-chart-overlay">
           <span className="live-calibrating">
@@ -2141,7 +2209,10 @@ function LiveCapture() {
   // Untapped seconds with an explicit sign, matching the headline readout.
   const fmtUntapped = (v) => (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(1) + 's';
 
-  const timeChartView = showStrokeInspector && (
+  // Timeline navigator: the review mode's always-visible scrubber (chart +
+  // range slider + prev/next). Lives in the sticky footer so a stroke or the
+  // map can be inspected up top while stepping through the row down here.
+  const timelineNav = showStrokeInspector && (
     <div className="live-time-chart">
       <div className="live-time-chart-wrapper">
         <Line data={timeChartData} options={timeChartOptions} />
@@ -2211,23 +2282,40 @@ function LiveCapture() {
           )}
         </div>
       </div>
-      {untappedStats && untappedHistData && (
-        <div className="live-untapped-panel">
-          <div className="live-untapped-stats">
-            <span className="live-untapped-stat">
-              <strong>{fmtUntapped(untappedStats.median)}</strong> median
-            </span>
-            <span className="live-untapped-stat">
-              <strong>{fmtUntapped(untappedStats.mean)}</strong> mean
-            </span>
-            <span className="live-untapped-stat">
-              ±{untappedStats.sd.toFixed(1)}s spread
-            </span>
+    </div>
+  );
+
+  // Untapped-time distribution: analysis content, scrolls in the review body.
+  // Folded behind its stats line by default so the timeline gets the space;
+  // tap the line to reveal the histogram.
+  const untappedView = showStrokeInspector && untappedStats && untappedHistData && (
+    <div className="live-untapped-panel">
+      <button
+        className="live-untapped-toggle"
+        onClick={toggleHist}
+        aria-expanded={histOpen}
+      >
+        <span className="live-untapped-stats">
+          <span className="live-untapped-stat">
+            <strong>{fmtUntapped(untappedStats.median)}</strong> median
+          </span>
+          <span className="live-untapped-stat">
+            <strong>{fmtUntapped(untappedStats.mean)}</strong> mean
+          </span>
+          <span className="live-untapped-stat">
+            ±{untappedStats.sd.toFixed(1)}s spread
+          </span>
+          {histOpen && (
             <span className="live-untapped-stat">
               {fmtUntapped(untappedStats.min)}…{fmtUntapped(untappedStats.max)} range
             </span>
-            <span className="live-untapped-stat">{untappedStats.n} strokes</span>
-          </div>
+          )}
+          {histOpen && <span className="live-untapped-stat">{untappedStats.n} strokes</span>}
+        </span>
+        <span className="live-untapped-chevron" aria-hidden="true">{histOpen ? '▾' : '▸'}</span>
+      </button>
+      {histOpen && (
+        <>
           <div className="live-untapped-hist-wrapper">
             <Bar data={untappedHistData} options={untappedHistOptions} />
           </div>
@@ -2244,7 +2332,7 @@ function LiveCapture() {
               )}
             </div>
           )}
-        </div>
+        </>
       )}
     </div>
   );
@@ -2270,41 +2358,21 @@ function LiveCapture() {
     </div>
   );
 
-  // Save / download (shared by both roles once a session has ended).
-  const sessionActions = (
-    <>
-      {/* Real-time replay of a loaded/captured recording — drive the live UI
-          from a desk for testing. Replays the selected stroke range when one is
-          set (drag the slider above), otherwise the whole row. */}
-      {hasRecording && (
-        <div className="live-replay-controls">
-          <button
-            className="btn btn-secondary btn-large"
-            onClick={() => startLiveReplay(recordingRef.current, replaySpeed, selection)}
-          >
-            {selection ? '▶ Replay range live' : '▶ Replay live'}
-          </button>
-          <label className="live-replay-speed">
-            Speed
-            <select
-              value={replaySpeed}
-              onChange={(e) => setReplaySpeed(Number(e.target.value))}
-            >
-              <option value={1}>1×</option>
-              <option value={2}>2×</option>
-              <option value={4}>4×</option>
-              <option value={8}>8×</option>
-            </select>
-          </label>
-        </div>
-      )}
-      {hasRecording && (
-        <button className="btn btn-secondary btn-large" onClick={downloadRecording}>
-          Download recording
-        </button>
-      )}
-    </>
-  );
+  // Real-time replay of the recording, from wherever the timeline points:
+  // the inspected stroke when one is selected, else the start of the selected
+  // range, else the whole row.
+  const replayFromSelection = () => {
+    let range = selection;
+    if (selectedIndex != null && strokes[selectedIndex]) {
+      const s = strokes[selectedIndex];
+      const end = selection ? selection.max : strokes[strokes.length - 1].time;
+      range = { min: s.startTime ?? s.time, max: Math.max(end, s.time) };
+    }
+    startLiveReplay(recordingRef.current, replaySpeed, range);
+  };
+  const replayLabel = selectedIndex != null
+    ? `▶ Replay from #${selectedIndex + 1}`
+    : selection ? '▶ Replay range' : '▶ Replay';
 
   // Coach-side video recording: film the rower while watching their live data,
   // then package the footage + strokes into a shareable, analyzable bundle. The
@@ -2404,8 +2472,99 @@ function LiveCapture() {
     </div>
   );
 
+  // --- Main panel switcher (stroke profile | map) ---
+  // Both panels stay mounted (hidden via CSS) so the map keeps its zoom/center
+  // and the chart its state; TrackMap re-fits itself on unhide via its own
+  // ResizeObserver.
+  const hasMap = !!mapView;
+  const effectivePanel = panel === 'map' && !hasMap ? 'stroke' : panel;
+  const choosePanel = (p) => {
+    setPanel(p);
+    try { localStorage.setItem(PANEL_KEY, p); } catch { /* storage unavailable */ }
+  };
+  const headView = (
+    <div className="live-head">
+      {statsView}
+      <div className="live-panel-tabs" role="tablist" aria-label="Data panel">
+        {[
+          { id: 'stroke', label: 'Stroke', enabled: true },
+          { id: 'map', label: 'Map', enabled: hasMap, hint: 'Available once GPS has a fix' },
+        ].map((t) => (
+          <button
+            key={t.id}
+            role="tab"
+            aria-selected={effectivePanel === t.id}
+            className={`live-panel-tab${effectivePanel === t.id ? ' active' : ''}`}
+            disabled={!t.enabled}
+            title={t.enabled ? undefined : t.hint}
+            onClick={() => choosePanel(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
+        {/* Outdoor full-screen readout — a live-rowing display, so only while
+            live/replaying; sits in the tab row so it's reachable from the map
+            panel too, not just the stroke chart. */}
+        {mode === 'live' && (
+          <button
+            className="live-panel-tab live-panel-tab-fs"
+            onClick={() => setBigScreen(true)}
+            aria-label="Full-screen display"
+            title="Full-screen display"
+          >
+            {'⛶'}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+  const panelsView = (
+    <div className="live-panels">
+      <div className="live-panel" hidden={effectivePanel !== 'stroke'}>{chartView}</div>
+      <div className="live-panel" hidden={effectivePanel !== 'map'}>{mapView}</div>
+    </div>
+  );
+
+  // Review mode's rare desk actions live in a ⋮ overflow (same pattern as the
+  // video analyzer) so the page itself stays panel + timeline only. Setup is
+  // reachable again from here too (e.g. a coach pairing with the next rower).
+  const reviewMenu = mode === 'review' ? (
+    <div className="va-actions-menu">
+      <button
+        className="app-bar-btn"
+        onClick={() => setMenuOpen((o) => !o)}
+        aria-label="Session actions"
+        aria-expanded={menuOpen}
+      >⋮</button>
+      {menuOpen && (
+        <>
+          <div className="va-menu-scrim" onClick={() => setMenuOpen(false)} />
+          <div className="va-menu-panel va-menu-panel-right" role="menu">
+            {hasRecording && (
+              <button role="menuitem" onClick={() => { setMenuOpen(false); downloadRecording(); }}>
+                Download recording
+              </button>
+            )}
+            {linkRole !== 'coach' && sensorStatus === 'available' && (
+              <button
+                role="menuitem"
+                disabled={isReplaying}
+                onClick={() => { setMenuOpen(false); fileInputRef.current?.click(); }}
+              >
+                {isReplaying ? 'Replaying…' : 'Load recording'}
+              </button>
+            )}
+            <button role="menuitem" onClick={() => { setMenuOpen(false); setSetupOpen((v) => !v); }}>
+              Rower / coach link setup
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  ) : null;
+
   return (
-    <AppShell page="live" title="Live Stroke Capture">
+    <AppShell page="live" title={pageTitle} actions={reviewMenu}>
     <div className="live-capture">
       {cameraOverlay}
       {bigScreen && (
@@ -2423,7 +2582,9 @@ function LiveCapture() {
           onClose={() => setBigScreen(false)}
         />
       )}
-      {linkPanel}
+      {/* Mode 1: setup — role, pairing, sensor status. Hidden while a session
+          is live or under review (⚙ re-opens it from review). */}
+      {(mode === 'setup' || (mode === 'review' && setupOpen)) && linkPanel}
 
       {recoverable && !isLive && (
         <div className="live-recover">
@@ -2449,43 +2610,12 @@ function LiveCapture() {
         </div>
       )}
 
-      {linkRole === 'coach' ? (
-        <>
-          <div className="live-guide">
-            {link.peerStatus === 'connected'
-              ? (isWatching
-                  ? "Receiving live data from the rower's phone."
-                  : 'Connected. Waiting for the rower to start capturing…')
-              : "Connect to the rower's phone above to watch their live stroke data."}
-          </div>
-          {isWatching && coachDiag && (
-            <div className="live-coach-diag">{coachDiag}</div>
-          )}
-          {statsView}
-          {chartView}
-          {timeChartView}
-          {mapView}
-          {activityView}
-          {videoView}
-          <div className="live-actions">
-            {isWatching && (
-              isPaused ? (
-                <button className="btn btn-primary btn-large" onClick={resumeWatch}>
-                  Resume live
-                </button>
-              ) : (
-                <button className="btn btn-secondary btn-large" onClick={pauseWatch}>
-                  Pause to inspect
-                </button>
-              )
-            )}
-            {(hasRecording || (isWatching && strokeCount > 0)) && (
-              <button className="btn btn-secondary btn-large" onClick={downloadRecording}>
-                Download recording
-              </button>
-            )}
-          </div>
-        </>
+      {mode === 'setup' && (linkRole === 'coach' ? (
+        <div className="live-guide">
+          {link.peerStatus === 'connected'
+            ? 'Connected. Waiting for the rower to start capturing…'
+            : "Connect to the rower's phone above to watch their live stroke data."}
+        </div>
       ) : (
         <>
           {sensorStatus === 'checking' && (
@@ -2526,59 +2656,147 @@ function LiveCapture() {
                 direction is detected automatically. Capture pauses when you stop
                 rowing and resumes on its own, so warm-ups and rests don't count.
               </div>
-
-              {statsView}
-              {chartView}
-              {timeChartView}
-              {mapView}
-              {activityView}
-
+              <div className="live-actions-secondary">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="application/json,.json"
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) handleLoadRecording(f);
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  className="btn btn-secondary btn-large"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isReplaying}
+                >
+                  {isReplaying ? 'Replaying…' : 'Load recording'}
+                </button>
+              </div>
               <div className="live-actions">
-                {!isCapturing ? (
-                  <button className="btn btn-primary btn-large live-start-btn" onClick={startCapture}>
-                    {strokeCount > 0 ? 'Restart Capture' : 'Start Capture'}
-                  </button>
-                ) : (
-                  <button
-                    className="btn btn-large live-stop-btn"
-                    onPointerDown={beginHoldStop}
-                    onPointerUp={cancelHoldStop}
-                    onPointerLeave={cancelHoldStop}
-                    onPointerCancel={cancelHoldStop}
-                    onContextMenu={(e) => e.preventDefault()}
-                    style={holdPct > 0 ? {
-                      background: `linear-gradient(to right, #7f1d1d ${holdPct}%, #dc2626 ${holdPct}%)`,
-                    } : undefined}
-                  >
-                    {holdPct > 0 ? 'Keep holding to stop…' : 'Hold to Stop'}
-                  </button>
-                )}
-                {!isCapturing && sessionActions}
-                {!isCapturing && (
-                  <>
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      accept="application/json,.json"
-                      style={{ display: 'none' }}
-                      onChange={(e) => {
-                        const f = e.target.files?.[0];
-                        if (f) handleLoadRecording(f);
-                        e.target.value = '';
-                      }}
-                    />
-                    <button
-                      className="btn btn-secondary btn-large"
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={isReplaying}
-                    >
-                      {isReplaying ? 'Replaying…' : 'Load recording'}
-                    </button>
-                  </>
-                )}
+                <button
+                  key="start"
+                  className="btn btn-primary btn-large live-start-btn"
+                  onClick={startCapture}
+                  disabled={startLocked}
+                >
+                  Start Capture
+                </button>
               </div>
             </>
           )}
+        </>
+      ))}
+
+      {/* Mode 2: live / replay — glance stats, one panel, and the stop (or
+          pause) control. Setup collapses to the connected chip. */}
+      {mode === 'live' && (
+        <>
+          {link.peerStatus === 'connected' && linkPanel}
+          {linkRole === 'coach' && isWatching && strokeCount === 0 && (
+            <div className="live-guide">Receiving live data from the rower's phone…</div>
+          )}
+          {linkRole === 'coach' && coachDiag && (
+            <div className="live-coach-diag">{coachDiag}</div>
+          )}
+          {headView}
+          {panelsView}
+          {activityView}
+          {linkRole === 'coach' && isWatching && videoView}
+          <div className="live-actions">
+            {/* A coach pauses the stream they're watching; anything running
+                locally (rower capture, either role's desk replay) is ended
+                with hold-to-stop. */}
+            {linkRole === 'coach' && !isCapturing ? (
+              <button className="btn btn-secondary btn-large" onClick={pauseWatch}>
+                Pause to inspect
+              </button>
+            ) : (
+              <button
+                key="stop"
+                className="btn btn-large live-stop-btn"
+                onPointerDown={beginHoldStop}
+                onPointerUp={cancelHoldStop}
+                onPointerLeave={cancelHoldStop}
+                onPointerCancel={cancelHoldStop}
+                onContextMenu={(e) => e.preventDefault()}
+                style={holdPct > 0 ? {
+                  background: `linear-gradient(to right, #7f1d1d ${holdPct}%, #dc2626 ${holdPct}%)`,
+                } : undefined}
+              >
+                {holdPct > 0 ? 'Keep holding to stop…' : 'Hold to Stop'}
+              </button>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* Mode 3: post-row analysis — the timeline navigator stays pinned at
+          the bottom while the stroke or map panel above follows it. */}
+      {mode === 'review' && (
+        <>
+          {headView}
+          {panelsView}
+          {untappedView}
+          {linkRole !== 'coach' && sensorStatus === 'available' && (
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/json,.json"
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) handleLoadRecording(f);
+                e.target.value = '';
+              }}
+            />
+          )}
+          {linkRole === 'coach' && videoView}
+          <div className="live-foot">
+            {timelineNav}
+            <div className="live-foot-actions">
+              {hasRecording && (
+                <>
+                  <button className="btn btn-secondary" onClick={replayFromSelection} disabled={isReplaying}>
+                    {replayLabel}
+                  </button>
+                  <label className="live-replay-speed">
+                    <select
+                      value={replaySpeed}
+                      onChange={(e) => setReplaySpeed(Number(e.target.value))}
+                      aria-label="Replay speed"
+                    >
+                      <option value={1}>1×</option>
+                      <option value={2}>2×</option>
+                      <option value={4}>4×</option>
+                      <option value={8}>8×</option>
+                    </select>
+                  </label>
+                </>
+              )}
+              {linkRole === 'coach' ? (
+                isWatching && isPaused && (
+                  <button className="btn btn-primary" onClick={resumeWatch}>
+                    Resume live
+                  </button>
+                )
+              ) : (
+                sensorStatus === 'available' && (
+                  <button
+                    key="start"
+                    className="btn btn-primary live-start-btn"
+                    onClick={startCapture}
+                    disabled={startLocked}
+                  >
+                    Restart Capture
+                  </button>
+                )
+              )}
+            </div>
+          </div>
         </>
       )}
     </div>

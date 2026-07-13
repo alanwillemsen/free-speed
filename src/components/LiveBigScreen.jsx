@@ -224,14 +224,15 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
       </div>
       <div className="bigscreen-label" style={{ color: c.muted }}>untapped / 2k</div>
       {avgFreeSpeedSeconds != null && (
-        <div
-          className="bigscreen-value bigscreen-freespeed bigscreen-freespeed-avg"
-          style={{ color: avgFreeSpeedSeconds > 0.5 ? c.warn : c.good }}
-        >
-          {fmtFree(avgFreeSpeedSeconds)}
-          {' '}
-          <span className="bigscreen-delta-cap" style={{ color: c.muted }}>avg</span>
-        </div>
+        <>
+          <div
+            className="bigscreen-value bigscreen-freespeed bigscreen-freespeed-avg"
+            style={{ color: avgFreeSpeedSeconds > 0.5 ? c.warn : c.good }}
+          >
+            {fmtFree(avgFreeSpeedSeconds)}
+          </div>
+          <div className="bigscreen-label" style={{ color: c.muted }}>avg</div>
+        </>
       )}
     </div>
   );
@@ -250,13 +251,12 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
       >
         <div className="bigscreen-distance-piece" style={{ color: pieceFlash ? c.good : c.fg }}>
           {Math.round(pieceDistance || 0).toLocaleString()} m
-          {' '}
-          <span className="bigscreen-delta-cap" style={{ color: c.muted }}>piece · hold to reset</span>
         </div>
+        <div className="bigscreen-label" style={{ color: c.muted }}>piece · hold to reset</div>
         <div className="bigscreen-distance-total" style={{ color: c.muted }}>
-          {Math.round(sessionDistance || 0).toLocaleString()} m{' '}
-          <span className="bigscreen-delta-cap">total</span>
+          {Math.round(sessionDistance || 0).toLocaleString()} m
         </div>
+        <div className="bigscreen-label" style={{ color: c.muted }}>total</div>
       </div>
     </div>
   );

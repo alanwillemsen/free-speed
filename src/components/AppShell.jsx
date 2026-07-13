@@ -7,10 +7,10 @@ import { useTheme } from '../hooks/useTheme';
 // buttons. Pages render <AppShell page=… title=…>…body…</AppShell>.
 
 const DESTINATIONS = [
-  { id: 'calculator', label: 'Efficiency Calculator', hash: '' },
-  { id: 'live', label: 'Live Stroke Capture', hash: '#live' },
+  { id: 'live', label: 'Live Stroke Capture', hash: '' },
   { id: 'course', label: 'Course Marks', hash: '#course' },
   { id: 'analyze', label: 'Video Analysis', hash: '#analyze' },
+  { id: 'calculator', label: 'Efficiency Calculator', hash: '#calculator' },
   { id: 'tradeoffs', label: 'Tradeoffs', hash: '#tradeoffs' },
 ];
 

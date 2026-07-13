@@ -115,7 +115,10 @@ function VideoAnalysis() {
   const fps = anchorRef.current.fps || 30;
 
   // --- Loading ---
-  const loadFromZip = useCallback(async (zipBlob) => {
+  // persist: keep the bundle in IndexedDB so a tab reload (mobile browsers reap
+  // heavy tabs under memory pressure) restores it instead of losing the session.
+  // Off when the bundle is already being read back from that store.
+  const loadFromZip = useCallback(async (zipBlob, { persist = true } = {}) => {
     setLoading(true);
     setError('');
     try {
@@ -135,6 +138,7 @@ function VideoAnalysis() {
       setNudgeMs(0);
       nudgeRef.current = 0;
       setHasData(true);
+      if (persist) videoStore.putCurrent(zipBlob).catch(() => {});
     } catch (e) {
       setError('Could not load bundle: ' + (e?.message ?? e));
       setHasData(false);
@@ -143,12 +147,17 @@ function VideoAnalysis() {
     }
   }, []);
 
-  // On mount, pick up an in-memory hand-off from Live Capture, if any.
+  // On mount, pick up a hand-off from Live Capture; failing that, restore the
+  // bundle that was open before a reload.
   useEffect(() => {
     let cancelled = false;
-    videoStore.takeHandoff()
-      .then((h) => { if (!cancelled && h?.blob) loadFromZip(h.blob); })
-      .catch(() => {});
+    (async () => {
+      const h = await videoStore.takeHandoff().catch(() => null);
+      if (cancelled) return;
+      if (h?.blob) { loadFromZip(h.blob); return; }
+      const cur = await videoStore.getCurrent().catch(() => null);
+      if (!cancelled && cur?.blob) loadFromZip(cur.blob, { persist: false });
+    })();
     return () => { cancelled = true; };
   }, [loadFromZip]);
 

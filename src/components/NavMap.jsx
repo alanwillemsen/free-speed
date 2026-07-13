@@ -37,6 +37,9 @@ function NavMap({ track, accent, trackColor }) {
   const wrapRef = useRef(null);
   const rotorRef = useRef(null);
   const mapRef = useRef(null);
+  // Visible wrapper height in px, for placing the boat near the top of the
+  // screen regardless of zoom (the look-ahead offset is screen-relative).
+  const wrapHeightRef = useRef(0);
   // Side of the square rotated container: the wrapper's diagonal, so the map
   // fills the view at every rotation angle.
   const [side, setSide] = useState(0);
@@ -88,6 +91,7 @@ function NavMap({ track, accent, trackColor }) {
     mapRef.current = { map, line, ray, dot, tip, course, hasView: false };
     const ro = new ResizeObserver(([entry]) => {
       const { width, height } = entry.contentRect;
+      wrapHeightRef.current = height;
       setSide(Math.ceil(Math.hypot(width, height)));
     });
     ro.observe(wrapRef.current);
@@ -143,9 +147,15 @@ function NavMap({ track, accent, trackColor }) {
       const delta = ((target - rotRef.current) % 360 + 540) % 360 - 180;
       rotRef.current += delta;
       setRot(rotRef.current);
-      // Center ahead of the boat: the dot rides the upper half of the screen
+      // Center ahead of the boat so the dot rides near the top of the screen
       // and the map real estate goes to the water being rowed into (below).
-      center = destinationPoint(lat, lon, heading, HEADING_RAY_M * 1.2);
+      // The offset is a fraction of the visible height converted to meters at
+      // the current zoom — a fixed metric offset would push the boat off the
+      // top of the frame when zoomed in.
+      const metersPerPx =
+        (40075016.686 * Math.cos((lat * Math.PI) / 180)) / 2 ** (zoom + 8);
+      const aheadM = wrapHeightRef.current * 0.25 * metersPerPx;
+      center = destinationPoint(lat, lon, heading, aheadM);
       center = [center.lat, center.lon];
     } else {
       m.ray.remove();
@@ -162,7 +172,10 @@ function NavMap({ track, accent, trackColor }) {
       // transition, so position and orientation move as one.
       m.map.panTo(center, { animate: true, duration: 0.95, easeLinearity: 1 });
     }
-  }, [lat, lon, heading, zoom, accent]);
+    // `side` is a dep so the boat-ahead offset (a fraction of the measured
+    // wrapper height) is reapplied once the ResizeObserver reports a size —
+    // the first fix can land before it fires.
+  }, [lat, lon, heading, zoom, accent, side]);
 
   return (
     <div ref={wrapRef} className="bignav">

@@ -29,7 +29,9 @@ function CurveHeader({ entry, isNew, isDirty, initialName, initialDesc, onSave, 
     setDesc(entry?.desc ?? initialDesc ?? '');
   }, [entry?.id]);
 
-  const isExampleOrNew = isNew || entry?.isExample;
+  // Shared curves behave like examples: not in local storage yet, so edits
+  // mark the curve dirty (to be saved as a new entry) instead of committing.
+  const isExampleOrNew = isNew || entry?.isExample || entry?.isShared;
 
   // Saved curves: auto-commit name on blur
   const commitName = () => {
@@ -69,7 +71,7 @@ function CurveHeader({ entry, isNew, isDirty, initialName, initialDesc, onSave, 
           onKeyDown={e => e.key === 'Enter' && e.target.blur()}
           placeholder="Untitled curve"
         />
-        {(isNew || isDirty) && (
+        {(isNew || isDirty || entry?.isShared) && (
           <button className="btn btn-primary btn-save-curve" onClick={handleSave} title="Saved to this browser only">
             Save to browser
           </button>

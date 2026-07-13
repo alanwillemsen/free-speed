@@ -58,7 +58,10 @@ function RowerIcon({ bowX, hullLen, cy, tint }) {
   );
 }
 
-function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeChange, energyPenaltyPercent, estimatedFinishTime }) {
+// show: 'all' (default) renders numbers + race graphic; 'metrics' just the
+// numbers (for the calculator's side column); 'race' just the graphic (full
+// width below, where the boats are big enough to read).
+function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeChange, energyPenaltyPercent, estimatedFinishTime, show = 'all' }) {
   const [inputValue, setInputValue] = useState(formatTime(raceTime));
 
   const boatLength = 8.2; // racing single (1x) length in metres
@@ -125,13 +128,17 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
   // red in the rare case your current stroke is already smoother than the reference.
   const resultClass = absDifference < 0.1 ? '' : isPotentialFaster ? 'better' : 'worse';
 
+  const showMetrics = show !== 'race';
+  const showRace = show !== 'metrics';
+
   return (
     <div className="boat-visualization">
-      <h3>Race Finish Visualization</h3>
+      <h3>{showRace ? 'Race Finish Visualization' : 'Results'}</h3>
 
+      {showMetrics && (
       <div className="race-metrics">
         <div className="race-metric">
-          <span className="race-metric-label">You now:</span>
+          <span className="race-metric-label">Your current 2k time:</span>
           <input
             className="time-input"
             value={inputValue}
@@ -142,7 +149,7 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
           />
         </div>
         <div className="race-metric">
-          <span className="race-metric-label">Your potential finish time:</span>
+          <span className="race-metric-label">Your potential 2k time:</span>
           <span className={`race-metric-value ${resultClass}`}>
             {formatTime(estimatedFinishTime)}
           </span>
@@ -160,14 +167,18 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
           </span>
         </div>
       </div>
+      )}
 
+      {showMetrics && (
       <p className="viz-description">
         {absDifference < 0.1
           ? 'Both velocity profiles require the same energy — boats finish together.'
           : <>With the same total energy, your potential finishes {isPotentialFaster ? 'ahead' : 'behind'} by <span className="distance-diff">{absDifference.toFixed(1)}m</span>.</>
         }
       </p>
+      )}
 
+      {showRace && (
       <svg viewBox={`0 0 ${svgWidth} ${svgHeight}`} width="100%" className="boat-svg">
         {/* Water */}
         <rect x="0" y={trackY} width={svgWidth} height={trackHeight} fill="#E3F2FD" stroke="#90CAF9" strokeWidth="1" />
@@ -272,9 +283,10 @@ function BoatVisualization({ timeDifference, avgVelocityA, raceTime, onRaceTimeC
           );
         })()}
       </svg>
+      )}
 
-      {absDifference < 0.1 && <p className="viz-note">≈ Curves have similar efficiency profiles.</p>}
-      {absDifference >= 0.1 && !isPotentialFaster && <p className="viz-note success">✓ You now are more efficient and would finish ahead!</p>}
+      {showRace && absDifference < 0.1 && <p className="viz-note">≈ Curves have similar efficiency profiles.</p>}
+      {showRace && absDifference >= 0.1 && !isPotentialFaster && <p className="viz-note success">✓ You now are more efficient and would finish ahead!</p>}
     </div>
   );
 }

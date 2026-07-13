@@ -30,7 +30,10 @@ export function parseShareHash() {
   const hash = window.location.hash;
   const match = hash.match(/^#s=(.+)$/);
   if (!match) return null;
-  return decodeCurve(match[1]);
+  const payload = decodeCurve(match[1]);
+  // A shared curve isn't in this browser yet (no id) — flag it so the header
+  // offers Save and edits don't try to update a nonexistent stored entry.
+  return payload ? { ...payload, isShared: true } : null;
 }
 
 export const EXAMPLE_CURVES = [
@@ -73,6 +76,9 @@ function loadSaved() {
 
 function SavedCurves({ onLoad, onNew, onDuplicate, viewingCurveId, refreshKey }) {
   const [saved, setSaved] = useState(loadSaved);
+  // Mobile-only fold state; the toggle bar is hidden on desktop where the
+  // list is always visible.
+  const [listOpen, setListOpen] = useState(false);
 
   // Reload when another part of the app saves a new curve
   useEffect(() => {
@@ -103,15 +109,33 @@ function SavedCurves({ onLoad, onNew, onDuplicate, viewingCurveId, refreshKey })
     setSaved(next);
   };
 
+  // On phones the curve list starts folded behind this bar (it was pushing the
+  // chart two screens down); on desktop the bar is hidden and the list always
+  // shows. Selecting a curve folds the list back up.
+  const currentName =
+    [...EXAMPLE_CURVES, ...saved].find((e) => e.id === viewingCurveId)?.name ?? 'New curve';
+  const pick = (fn) => (...args) => { setListOpen(false); fn(...args); };
+
   return (
-    <nav className="left-nav">
+    <nav className={`left-nav${listOpen ? ' open' : ''}`}>
+      <button
+        className="left-nav-toggle"
+        onClick={() => setListOpen((o) => !o)}
+        aria-expanded={listOpen}
+      >
+        <span className="left-nav-toggle-label">
+          Curves · <strong>{currentName}</strong>
+        </span>
+        <span aria-hidden="true">{listOpen ? '▾' : '▸'}</span>
+      </button>
+      <div className="left-nav-body">
       <div className="nav-section-label">Examples</div>
       <div className="nav-curve-list nav-curve-list-fixed">
         {EXAMPLE_CURVES.map(entry => (
           <button
             key={entry.id}
             className={`nav-curve-item${entry.id === viewingCurveId ? ' active' : ''}`}
-            onClick={() => onLoad(entry)}
+            onClick={() => pick(onLoad)(entry)}
           >
             <span className="nav-curve-name">{entry.name}</span>
             {entry.desc && <span className="nav-curve-desc">{entry.desc}</span>}
@@ -135,7 +159,7 @@ function SavedCurves({ onLoad, onNew, onDuplicate, viewingCurveId, refreshKey })
 
       <div className="nav-section-label nav-section-label-row">
         <span>Saved Curves</span>
-        <button className="btn btn-primary btn-new-curve" onClick={onNew}>+ New</button>
+        <button className="btn btn-primary btn-new-curve" onClick={pick(onNew)}>+ New</button>
       </div>
 
       <div className="nav-curve-list">
@@ -146,7 +170,7 @@ function SavedCurves({ onLoad, onNew, onDuplicate, viewingCurveId, refreshKey })
           <button
             key={entry.id}
             className={`nav-curve-item${entry.id === viewingCurveId ? ' active' : ''}`}
-            onClick={() => onLoad(entry)}
+            onClick={() => pick(onLoad)(entry)}
           >
             <span className="nav-curve-name">{entry.name}</span>
             {entry.desc && <span className="nav-curve-desc">{entry.desc}</span>}
@@ -172,6 +196,7 @@ function SavedCurves({ onLoad, onNew, onDuplicate, viewingCurveId, refreshKey })
             </span>
           </button>
         ))}
+      </div>
       </div>
     </nav>
   );
