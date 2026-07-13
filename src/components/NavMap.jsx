@@ -5,6 +5,7 @@ import { boatFixAt, destinationPoint } from '../utils/geo';
 import { createCourseOverlay } from '../utils/courseOverlay';
 import { createMarkOverlay } from '../utils/markOverlay';
 import { loadMarks, subscribeMarks } from '../utils/courseMarks';
+import { createBasemapLayers, getBasemap, toggleBasemap, subscribeBasemap } from '../utils/basemap';
 
 // Course-down navigation map for the big screen. The rower faces the stern,
 // so the display keeps the direction of travel pointing DOWN: the whole map
@@ -44,6 +45,11 @@ function NavMap({ track, accent, trackColor }) {
   // transition always takes the short way round instead of spinning back.
   const [rot, setRot] = useState(0);
   const rotRef = useRef(0);
+  // Water-data fetch behind the course lines: 'loading' | 'error' | 'ready' | null.
+  const [courseStatus, setCourseStatus] = useState(null);
+  const [basemap, setBasemapState] = useState(getBasemap);
+
+  useEffect(() => subscribeBasemap(setBasemapState), []);
 
   // Latest fix + direction of travel straight from the session track.
   const boat = useMemo(
@@ -64,12 +70,12 @@ function NavMap({ track, accent, trackColor }) {
       boxZoom: false,
       keyboard: false,
     });
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+    const base = createBasemapLayers(map, { attribution: false });
     const line = L.polyline([], { weight: 3, opacity: 0.7 }).addTo(map);
     // River course from OSM water data: banks + mid-channel divider, so the
     // rower can hold the correct side. Added after the track, before the boat
     // layers, so the course draws over the trail but under dot/ray/chevron.
-    const course = createCourseOverlay(map);
+    const course = createCourseOverlay(map, setCourseStatus);
     // User-placed buoys/hazards/course-end lines. Their icons are circles, so
     // the rotating container doesn't matter — they read the same at any angle.
     const marks = createMarkOverlay(map);
@@ -90,6 +96,7 @@ function NavMap({ track, accent, trackColor }) {
       unsubMarks();
       marks.destroy();
       course.destroy();
+      base.destroy();
       map.remove();
       mapRef.current = null;
     };
@@ -169,12 +176,30 @@ function NavMap({ track, accent, trackColor }) {
         }}
       />
       {boat == null && <div className="bignav-wait">waiting for GPS…</div>}
+      {courseStatus === 'loading' && (
+        <div className="bignav-course-status">loading course…</div>
+      )}
+      {courseStatus === 'error' && (
+        <button
+          className="bignav-course-status is-error"
+          onClick={() => mapRef.current?.course.retry()}
+        >
+          no course — tap to retry
+        </button>
+      )}
       <div className="bignav-zoom">
         <button className="bigscreen-ctrl" onClick={() => setZoom((z) => Math.min(19, z + 1))} aria-label="Zoom in">+</button>
         <button className="bigscreen-ctrl" onClick={() => setZoom((z) => Math.max(13, z - 1))} aria-label="Zoom out">−</button>
+        <button
+          className="bigscreen-ctrl"
+          onClick={toggleBasemap}
+          aria-label={basemap === 'sat' ? 'Switch to street map' : 'Switch to satellite'}
+        >
+          {basemap === 'sat' ? '🗺' : '🛰'}
+        </button>
       </div>
       {/* Attribution stays screen-horizontal, outside the rotated container. */}
-      <div className="bignav-attrib">© OpenStreetMap</div>
+      <div className="bignav-attrib">{basemap === 'sat' ? '© Esri, Maxar' : '© OpenStreetMap'}</div>
     </div>
   );
 }

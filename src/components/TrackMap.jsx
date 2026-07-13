@@ -5,6 +5,7 @@ import { boatFixAt } from '../utils/geo';
 import { createCourseOverlay } from '../utils/courseOverlay';
 import { createMarkOverlay } from '../utils/markOverlay';
 import { loadMarks, subscribeMarks } from '../utils/courseMarks';
+import { createBasemapLayers, getBasemap, toggleBasemap, subscribeBasemap } from '../utils/basemap';
 
 // Boat marker: a north-pointing arrow rotated to the heading, or a plain dot
 // when the direction is unknown (stationary / single fix).
@@ -35,17 +36,19 @@ function TrackMap({ track, boat, label }) {
   const [follow, setFollow] = useState(true);
   const followRef = useRef(true);
   followRef.current = follow;
+  // Water-data fetch behind the course lines: 'loading' | 'error' | 'ready' | null.
+  const [courseStatus, setCourseStatus] = useState(null);
+  const [basemap, setBasemapState] = useState(getBasemap);
+
+  useEffect(() => subscribeBasemap(setBasemapState), []);
 
   useEffect(() => {
     const map = L.map(containerRef.current, { zoomControl: true });
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-    }).addTo(map);
+    const base = createBasemapLayers(map);
     const line = L.polyline([], { color: '#667eea', weight: 3, opacity: 0.85 }).addTo(map);
     const marker = L.marker([0, 0], { icon: boatIcon(null), interactive: false, zIndexOffset: 1000 });
     // River course (banks + divider) traced from OSM water data around the boat.
-    const course = createCourseOverlay(map);
+    const course = createCourseOverlay(map, setCourseStatus);
     // User-placed buoys/hazards/course-end lines (edited on the #course page).
     const marks = createMarkOverlay(map);
     marks.setMarks(loadMarks());
@@ -63,6 +66,7 @@ function TrackMap({ track, boat, label }) {
       unsubMarks();
       marks.destroy();
       course.destroy();
+      base.destroy();
       map.remove();
       mapRef.current = null;
     };
@@ -124,11 +128,30 @@ function TrackMap({ track, boat, label }) {
     <div className="live-map">
       {label && <div className="live-map-label">{label}</div>}
       <div ref={containerRef} className="live-map-canvas" />
+      {courseStatus === 'loading' && (
+        <div className="live-map-course-status">Loading course…</div>
+      )}
+      {courseStatus === 'error' && (
+        <button
+          className="live-map-course-status is-error"
+          onClick={() => mapRef.current?.course.retry()}
+        >
+          Course unavailable — tap to retry
+        </button>
+      )}
       {!follow && (
         <button className="live-map-recenter" onClick={recenter} aria-label="Re-center on boat" title="Re-center on boat">
           ⌖
         </button>
       )}
+      <button
+        className="live-map-basemap"
+        onClick={toggleBasemap}
+        aria-label={basemap === 'sat' ? 'Switch to street map' : 'Switch to satellite'}
+        title={basemap === 'sat' ? 'Switch to street map' : 'Switch to satellite'}
+      >
+        {basemap === 'sat' ? '🗺' : '🛰'}
+      </button>
     </div>
   );
 }

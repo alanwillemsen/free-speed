@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Line } from 'react-chartjs-2';
 import { resolveTheme } from '../hooks/useTheme';
+import { useWakeLock } from '../hooks/useWakeLock';
 import NavMap from './NavMap';
 
 // Outdoor full-screen readout for the rower: just the split, the stroke rate,
@@ -69,6 +70,16 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
     if (holdTimerRef.current) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null; }
   };
   useEffect(() => cancelPieceHold, []);
+
+  // Keep the screen awake for as long as the readout is up. The rower stares
+  // at it without touching the screen, and capture/coach mode aren't always
+  // the ones holding a lock (the readout opens from any state), so it holds
+  // its own. useWakeLock re-acquires after the phone blinks off or backgrounds.
+  const { request: wakeLockRequest, release: wakeLockRelease } = useWakeLock();
+  useEffect(() => {
+    wakeLockRequest();
+    return () => wakeLockRelease();
+  }, [wakeLockRequest, wakeLockRelease]);
 
   // Go true full-screen and lock to landscape where the platform allows it.
   // Android only honours an orientation lock *while* full-screen, so the lock

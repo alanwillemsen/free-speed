@@ -1623,6 +1623,32 @@ body {
   pointer-events: none;
 }
 
+/* Course fetch status on the rotated map: fixed to the (unrotated) wrapper.
+   Dark badge with white text reads over both the day and night basemaps. */
+.bignav-course-status {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 2;
+  padding: 0.3rem 0.7rem;
+  border-radius: 8px;
+  border: none;
+  background: rgba(0, 0, 0, 0.55);
+  color: #ffffff;
+  font-size: 0.9rem;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+button.bignav-course-status {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.bignav-course-status.is-error {
+  color: #fbbf24;
+}
+
 .bignav-zoom {
   position: absolute;
   bottom: 10px;
@@ -1930,6 +1956,35 @@ body {
   line-height: 1;
   cursor: pointer;
   box-shadow: 0 2px 6px var(--shadow);
+}
+
+/* Course (water-data) fetch status: quiet note while loading, a tappable
+   retry after a failed Overpass fetch (otherwise it only auto-retries after
+   a minute). Bottom-left — Leaflet's zoom control owns the top-left. */
+.live-map-course-status {
+  position: absolute;
+  bottom: 24px;
+  left: 10px;
+  z-index: 1000;
+  padding: 0.25rem 0.6rem;
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  font-size: 0.78rem;
+  font-weight: 600;
+  box-shadow: 0 1px 4px var(--shadow);
+  pointer-events: none;
+}
+
+button.live-map-course-status {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.live-map-course-status.is-error {
+  color: var(--warning);
+  border-color: var(--warning);
 }
 
 .track-map-boat {
@@ -3389,4 +3444,31 @@ html[data-theme='dark'] .course-map .leaflet-control-attribution,
 html[data-theme='dark'] .course-map .leaflet-control-zoom a {
   background: var(--surface);
   color: var(--text-muted);
+}
+
+/* --- Basemap toggle (OSM street tiles vs Esri satellite) --- */
+
+.live-map-basemap {
+  position: absolute;
+  bottom: 24px;
+  left: 10px;
+  z-index: 1000;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  font-size: 1.05rem;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 2px 6px var(--shadow);
+}
+
+/* Night mode inverts street tiles into a dark basemap; satellite imagery
+   must never go through that filter. The map container carries .basemap-sat
+   while imagery is active (see utils/basemap.js). */
+html[data-theme='dark'] .live-map .basemap-sat.leaflet-container .leaflet-tile-pane,
+html[data-theme='dark'] .course-map.basemap-sat .leaflet-tile-pane,
+.bigscreen.theme-dark .bignav .basemap-sat.leaflet-container .leaflet-tile-pane {
+  filter: none;
 }

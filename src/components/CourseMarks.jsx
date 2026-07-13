@@ -12,6 +12,7 @@ import {
   decodeShareParam,
 } from '../utils/courseMarks';
 import { createMarkOverlay, markIcon, dockWidthAt, dockLengthM } from '../utils/markOverlay';
+import { createBasemapLayers, getBasemap, toggleBasemap, subscribeBasemap } from '../utils/basemap';
 
 // Map editor for local course knowledge OSM doesn't have: centre-line buoys
 // (which often sit off the geometric middle), shallow-water hazard buoys, and
@@ -58,6 +59,9 @@ function CourseMarks() {
   pendingDockRef.current = pendingDock;
   const fileRef = useRef(null);
   const toastTimer = useRef(null);
+  const [basemap, setBasemapState] = useState(getBasemap);
+
+  useEffect(() => subscribeBasemap(setBasemapState), []);
 
   const notify = (msg) => {
     setToast(msg);
@@ -74,10 +78,7 @@ function CourseMarks() {
 
   useEffect(() => {
     const map = L.map(containerRef.current, { zoomControl: true });
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-    }).addTo(map);
+    const base = createBasemapLayers(map);
     const overlay = createMarkOverlay(map, {
       interactive: true,
       onSelect: (id) => {
@@ -146,6 +147,7 @@ function CourseMarks() {
     return () => {
       ro.disconnect();
       overlay.destroy();
+      base.destroy();
       map.remove();
       mapRef.current = null;
     };
@@ -303,6 +305,14 @@ function CourseMarks() {
             </button>
           ))}
           <div className="course-toolbar-spacer" />
+          <button
+            className="course-tool"
+            onClick={toggleBasemap}
+            aria-pressed={basemap === 'sat'}
+            title={basemap === 'sat' ? 'Switch to street map' : 'Switch to satellite'}
+          >
+            {basemap === 'sat' ? '🗺 Map' : '🛰 Satellite'}
+          </button>
           <button className="course-tool" onClick={copyLink}>Share link</button>
           <button className="course-tool" onClick={exportFile}>Export</button>
           <button className="course-tool" onClick={() => fileRef.current?.click()}>Import</button>

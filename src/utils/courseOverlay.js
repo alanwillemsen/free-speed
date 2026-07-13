@@ -79,7 +79,13 @@ function segIntersects(a1, a2, b1, b2) {
   return d1 * d2 < 0 && d3 * d4 < 0;
 }
 
-export function createCourseOverlay(map) {
+// `onStatus` (optional) hears about the water fetch behind the course:
+// 'loading' while a fetch the drawn course is waiting on is in flight,
+// 'error' after one fails (retried automatically after FETCH_RETRY_MS, or
+// immediately via retry()), 'ready' once a course is drawn, null when there
+// is simply no course here (fix off water, no heading yet). Background
+// fetches for an already-drawn course never surface — the lines just grow.
+export function createCourseOverlay(map, onStatus = null) {
   // Casings first: within the overlay pane, SVG paint order is add order.
   const casings = [
     L.polyline([], BANK_CASING).addTo(map),
@@ -115,6 +121,13 @@ export function createCourseOverlay(map) {
   let memory = null; // split classifications (island hysteresis)
   let extending = false;
   let deadEnds = { ahead: false, behind: false };
+  let status = null;
+
+  const setStatus = (s) => {
+    if (s === status) return;
+    status = s;
+    onStatus?.(s);
+  };
 
   // Nearest divider vertex to the fix — cheap at 25 m vertex spacing.
   const nearest = (fix) => {
@@ -166,6 +179,7 @@ export function createCourseOverlay(map) {
       nonIslands: [...(memory?.nonIslands ?? []), ...c.memory.nonIslands].slice(-MEMORY_CAP),
     };
     setAll(course);
+    setStatus('ready');
   };
 
   // Marks changed while we're live: re-clip against the current lines (a new
@@ -192,6 +206,34 @@ export function createCourseOverlay(map) {
       deadEnds = { ahead: false, behind: false };
       adopt(c);
     }
+  };
+
+  // Keep the water geometry for the boat's cell on hand for (re)tracing.
+  // Failures back off FETCH_RETRY_MS before an automatic retry; retry()
+  // (the user's tap) clears the backoff and calls this straight away.
+  const ensureWater = () => {
+    if (destroyed || !last) return;
+    const key = cellKeyFor(last.lat, last.lon);
+    if (water?.key === key || pendingKey === key || Date.now() - failedAt <= FETCH_RETRY_MS) return;
+    pendingKey = key;
+    if (!course) setStatus('loading');
+    waterForCell(last.lat, last.lon).then(
+      (w) => {
+        pendingKey = null;
+        if (destroyed) return;
+        water = w;
+        ensureTraced();
+        // Water arrived but no course came of it (fix off the mapped water,
+        // heading still unknown): nothing to indicate, the trace will happen
+        // on a later fix.
+        if (!course) setStatus(null);
+      },
+      () => {
+        pendingKey = null;
+        failedAt = Date.now();
+        if (!destroyed && !course) setStatus('error');
+      }
+    );
   };
 
   const maybeExtend = () => {
@@ -234,20 +276,7 @@ export function createCourseOverlay(map) {
         Math.abs(((heading - last.heading + 540) % 360) - 180) < 12;
       last = { lat: boat.lat, lon: boat.lon, heading };
 
-      // Keep the water geometry for the boat's cell on hand for (re)tracing.
-      const key = cellKeyFor(boat.lat, boat.lon);
-      if (water?.key !== key && pendingKey !== key && Date.now() - failedAt > FETCH_RETRY_MS) {
-        pendingKey = key;
-        waterForCell(boat.lat, boat.lon).then(
-          (w) => {
-            pendingKey = null;
-            if (destroyed) return;
-            water = w;
-            ensureTraced();
-          },
-          () => { pendingKey = null; failedAt = Date.now(); }
-        );
-      }
+      ensureWater();
 
       if (course) {
         // Rowed off the traced waterway? Start over. Otherwise the lines
@@ -256,6 +285,7 @@ export function createCourseOverlay(map) {
           course = null;
           deadEnds = { ahead: false, behind: false };
           setAll(null);
+          setStatus(pendingKey != null ? 'loading' : null);
         } else {
           maybeExtend();
           return;
@@ -263,6 +293,11 @@ export function createCourseOverlay(map) {
       }
 
       ensureTraced();
+    },
+    // Immediate re-fetch after a failure, without waiting out the backoff.
+    retry() {
+      failedAt = 0;
+      ensureWater();
     },
     destroy() {
       destroyed = true;

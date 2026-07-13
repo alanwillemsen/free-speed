@@ -13,13 +13,21 @@ import { useRef, useCallback, useEffect } from 'react';
 export function useWakeLock() {
   const lockRef = useRef(null);
   const wantRef = useRef(false);
+  const pendingRef = useRef(false);
 
   const acquire = useCallback(async () => {
     if (!('wakeLock' in navigator)) return;
-    if (lockRef.current) return; // already held
+    if (lockRef.current || pendingRef.current) return; // held or being acquired
     if (document.visibilityState !== 'visible') return; // request would reject
+    pendingRef.current = true;
     try {
       const lock = await navigator.wakeLock.request('screen');
+      // release() may have run while the request was in flight (quick
+      // mount/unmount) — drop the fresh lock instead of holding it forever.
+      if (!wantRef.current) {
+        lock.release?.().catch?.(() => {});
+        return;
+      }
       lockRef.current = lock;
       // The platform fires 'release' when it drops the lock on hide; clear our
       // handle so the next visibility change knows to ask for a fresh one.
@@ -27,6 +35,7 @@ export function useWakeLock() {
         if (lockRef.current === lock) lockRef.current = null;
       });
     } catch { /* unsupported or denied — non-critical */ }
+    finally { pendingRef.current = false; }
   }, []);
 
   const request = useCallback(() => {
