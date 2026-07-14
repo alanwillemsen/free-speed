@@ -1848,6 +1848,7 @@ function LiveCapture() {
     <TrackMap
       track={positions}
       boat={boatDisplay}
+      coverTrack={mode === 'review'}
       label={individualStroke
         ? (boatDisplay
             ? `Stroke #${selectedIndex + 1} — position at end of stroke`

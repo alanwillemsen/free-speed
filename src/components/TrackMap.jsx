@@ -29,8 +29,10 @@ function boatIcon(heading) {
 
 // OSM map showing the session's GPS track and (optionally) the boat's position
 // and direction of travel. The view follows the boat until the user drags the
-// map away; a re-center button brings it back.
-function TrackMap({ track, boat, label }) {
+// map away; a re-center button brings it back. With `coverTrack` (review of a
+// finished/loaded session) the course overlay grows to span the whole track,
+// not just the stretch around its anchor fix.
+function TrackMap({ track, boat, label, coverTrack = false }) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
   const [follow, setFollow] = useState(true);
@@ -96,6 +98,9 @@ function TrackMap({ track, boat, label }) {
   useEffect(() => {
     if (courseFix) mapRef.current?.course.update(courseFix);
   }, [courseFix]);
+  useEffect(() => {
+    if (coverTrack && track.length > 1) mapRef.current?.course.cover(track);
+  }, [coverTrack, track]);
 
   const boatLat = boat?.lat, boatLon = boat?.lon, boatHeading = boat?.heading;
   useEffect(() => {

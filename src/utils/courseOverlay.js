@@ -12,18 +12,39 @@
 // waterway) starts a fresh trace.
 import L from 'leaflet';
 import { waterForCell, cellKeyFor } from './water';
-import { traceCourse, extendCourse } from './course';
+import { traceCourse, extendCourse, STEP_M } from './course';
 import { loadMarks, subscribeMarks } from './courseMarks';
+import { bearingDeg } from './geo';
 
 const BANK_CASING = { color: '#111827', weight: 9, opacity: 0.85, interactive: false };
 const BANK_CORE = { color: '#ffd60a', weight: 4.5, opacity: 1, interactive: false };
 const DIVIDER_CASING = { color: '#111827', weight: 8, opacity: 0.85, interactive: false };
-const DIVIDER_CORE = { color: '#ffffff', weight: 4, opacity: 1, dashArray: '10 14', interactive: false };
+// noClip: Leaflet normally clips a polyline to the viewport, which makes the
+// rendered path START at the screen edge — the dash pattern then phases from
+// a point that moves with every pan, crawling the dashes alongside the boat.
+// Unclipped, the path starts at its true (fixed) first vertex and the
+// dashOffset ground-anchor below can actually hold the pattern still.
+const DIVIDER_CORE = { color: '#ffffff', weight: 4, opacity: 1, dashArray: '10 14', interactive: false, noClip: true };
+
+// Divider dashes are road markings: fixed ground lengths, phase pinned to a
+// ground anchor via dashOffset. Without the pin the SVG pattern phases from
+// the polyline's first vertex, so every extension at the 'behind' end shifts
+// every dash on screen.
+const DASH_M = 10;
+const DASH_GAP_M = 14;
+const MIN_DASH_PX = 5; // zoomed out past this, ground-sized dashes smear —
+// fall back to the plain pixel pattern (individual dashes are moot out there)
 
 const OFF_COURSE_M = 150; // farther than this from the divider: new waterway
 const END_GUARD = 30; // stations (~750 m): extend when the boat gets this close to an end
 const FETCH_RETRY_MS = 60000;
 const MEMORY_CAP = 120;
+
+// Track coverage (cover()): review maps grow the course until it spans the
+// whole recorded track, not just the stretch around one fix.
+const COVER_TOL_M = 100; // a track point this close to the divider is covered
+const COVER_SAMPLE_M = 150; // spacing of the coverage targets along the track
+const COVER_MAX_STATIONS = 1200; // ~30 km — station ceiling while covering
 
 const moveM = (a, b) =>
   Math.hypot(
@@ -101,6 +122,31 @@ export function createCourseOverlay(map, onStatus = null) {
   const centerBuoys = () => marks.filter((m) => m.type === 'center');
   const endLines = () => marks.filter((m) => m.type === 'end');
 
+  let dashOrigin = null; // ground point a dash boundary stays pinned to
+  let dashChainM = 0; // metres along the drawn divider from its start to dashOrigin
+  const ll = (p) => ({ lat: p[0], lon: p[1] });
+
+  // Ground-anchored dash pattern (see DASH_M above): sizes in pixels for the
+  // current zoom, phase chosen so the pattern sits still at dashOrigin no
+  // matter where the polyline now starts. Re-run on zoom and on every redraw.
+  const applyDash = () => {
+    if (!dashOrigin) return;
+    // Pixels per ground metre at the course's latitude, straight from the map.
+    const a = map.latLngToLayerPoint(dashOrigin);
+    const b = map.latLngToLayerPoint([dashOrigin[0] + 100 / 111320, dashOrigin[1]]);
+    const ppm = Math.hypot(a.x - b.x, a.y - b.y) / 100;
+    if (DASH_M * ppm < MIN_DASH_PX) {
+      cores[2].setStyle({ dashArray: DIVIDER_CORE.dashArray, dashOffset: null });
+      return;
+    }
+    const periodPx = (DASH_M + DASH_GAP_M) * ppm;
+    const offset = (periodPx - ((dashChainM * ppm) % periodPx)) % periodPx;
+    cores[2].setStyle({
+      dashArray: `${DASH_M * ppm} ${DASH_GAP_M * ppm}`,
+      dashOffset: String(offset),
+    });
+  };
+
   const setAll = (course) => {
     const paths = course
       ? [course.left, course.right, warpThroughBuoys(course.center, centerBuoys())]
@@ -109,7 +155,28 @@ export function createCourseOverlay(map, onStatus = null) {
       casings[i].setLatLngs(latlngs);
       cores[i].setLatLngs(latlngs);
     });
+    // Re-measure how far dashOrigin now sits from the divider's (possibly
+    // just-moved) start. Geometry around the anchor is stable across
+    // extensions, so this distance grows by exactly the prepended length.
+    const div = paths[2];
+    if (div.length > 1) {
+      if (!dashOrigin) dashOrigin = [div[0][0], div[0][1]];
+      let best = Infinity, chain = 0, acc = 0;
+      for (let i = 0; i < div.length; i++) {
+        if (i > 0) acc += moveM(ll(div[i - 1]), ll(div[i]));
+        const d = moveM(ll(div[i]), ll(dashOrigin));
+        if (d < best) { best = d; chain = acc; }
+      }
+      // A fresh trace on other water: the old anchor is nowhere near — re-pin.
+      if (best > 100) { dashOrigin = [div[0][0], div[0][1]]; chain = 0; }
+      dashChainM = chain;
+      applyDash();
+    } else {
+      dashOrigin = null;
+      dashChainM = 0;
+    }
   };
+  map.on('zoomend', applyDash);
 
   let destroyed = false;
   let water = null;
@@ -122,6 +189,8 @@ export function createCourseOverlay(map, onStatus = null) {
   let extending = false;
   let deadEnds = { ahead: false, behind: false };
   let status = null;
+  let coverPts = null; // sampled track fixes the course must reach (cover())
+  let stationCap = null; // raised station cap while covering a long track
 
   const setStatus = (s) => {
     if (s === status) return;
@@ -180,6 +249,7 @@ export function createCourseOverlay(map, onStatus = null) {
     };
     setAll(course);
     setStatus('ready');
+    ensureCover();
   };
 
   // Marks changed while we're live: re-clip against the current lines (a new
@@ -201,7 +271,18 @@ export function createCourseOverlay(map, onStatus = null) {
   // from whatever stroke the user happens to tap next.
   const ensureTraced = () => {
     if (destroyed || course || !water || !last || last.heading == null || !settled) return;
-    const c = traceCourse(water, last.lat, last.lon, last.heading, memory);
+    let c = traceCourse(water, last.lat, last.lon, last.heading, memory);
+    // A recording's anchor fix is often the dock — reeds, GPS scatter, water
+    // the tracer rejects. With coverage targets on hand, fall back to seeding
+    // from the nearest track samples in this cell; the coverage loop then
+    // grows the course out to the rest of the track from wherever it took.
+    if (!c && coverPts) {
+      for (let i = coverPts.length - 1; i >= 0 && !c; i--) {
+        const p = coverPts[i];
+        if (p.heading == null || cellKeyFor(p.lat, p.lon) !== water.key) continue;
+        c = traceCourse(water, p.lat, p.lon, p.heading, memory);
+      }
+    }
     if (c) {
       deadEnds = { ahead: false, behind: false };
       adopt(c);
@@ -236,14 +317,12 @@ export function createCourseOverlay(map, onStatus = null) {
     );
   };
 
-  const maybeExtend = () => {
-    if (extending || !course || !last) return;
-    const { idx } = nearest(last);
+  // Extend one end of the course by EXTEND_M. Shared by the live path (the
+  // boat approaching an end) and track coverage; adopt() re-runs the
+  // coverage check after each successful step, so covering propels itself.
+  const requestExtend = (end) => {
+    if (extending || !course || deadEnds[end]) return;
     const n = course.center.length;
-    let end = null;
-    if (idx >= n - END_GUARD && !deadEnds.ahead) end = 'ahead';
-    else if (idx < END_GUARD && !deadEnds.behind) end = 'behind';
-    if (!end) return;
     // Fetch the cell of a point past the tip, so an extension across a cell
     // border gets the neighbouring geometry.
     const tip = end === 'ahead' ? course.center[n - 1] : course.center[0];
@@ -254,16 +333,48 @@ export function createCourseOverlay(map, onStatus = null) {
       (w) => {
         extending = false;
         if (destroyed || !course) return;
-        const c = extendCourse(w, course.stations, end, memory);
+        const c = extendCourse(w, course.stations, end, memory, stationCap ?? undefined);
         if (!c) {
           deadEnds[end] = true; // the water really stops there
+          ensureCover(); // coverage may still owe the other end
           return;
         }
-        if (c.trimmed) deadEnds[end === 'ahead' ? 'behind' : 'ahead'] = false;
+        if (c.trimmed) {
+          deadEnds[end === 'ahead' ? 'behind' : 'ahead'] = false;
+          // Station ceiling reached: growing one end now eats the other, so
+          // full coverage is off the table — stop before it ping-pongs.
+          coverPts = null;
+        }
         adopt(c);
       },
       () => { extending = false; } // offline: retried on a later fix
     );
+  };
+
+  const maybeExtend = () => {
+    if (extending || !course || !last) return;
+    const { idx } = nearest(last);
+    const n = course.center.length;
+    if (idx >= n - END_GUARD && !deadEnds.ahead) requestExtend('ahead');
+    else if (idx < END_GUARD && !deadEnds.behind) requestExtend('behind');
+  };
+
+  // One coverage step: find a target the course hasn't reached and extend the
+  // end it lies beyond. Targets whose nearest station sits mid-course are on
+  // water the ends can never reach (a tributary detour) and stay uncovered;
+  // once nothing actionable remains the targets are dropped.
+  const ensureCover = () => {
+    if (destroyed || !course || !coverPts || extending) return;
+    const n = course.center.length;
+    for (const p of coverPts) {
+      const { idx, dist } = nearest(p);
+      if (dist <= COVER_TOL_M) continue;
+      const end = idx < END_GUARD ? 'behind' : idx >= n - END_GUARD ? 'ahead' : null;
+      if (!end || deadEnds[end]) continue;
+      requestExtend(end);
+      return;
+    }
+    coverPts = null;
   };
 
   return {
@@ -288,11 +399,48 @@ export function createCourseOverlay(map, onStatus = null) {
           setStatus(pendingKey != null ? 'loading' : null);
         } else {
           maybeExtend();
+          ensureCover(); // resumes coverage stalled by an offline fetch
           return;
         }
       }
 
       ensureTraced();
+    },
+    // Review maps: grow the course until it spans this whole track (array of
+    // {lat, lon} fixes, oldest first). The track is sampled into sparse
+    // targets and the course extends end over end until every target is
+    // reached (or a dead end / other water rules it out). Idempotent —
+    // re-covering an already-spanned track does nothing.
+    cover(points) {
+      if (destroyed || !points || points.length < 2) return;
+      const pts = [];
+      let lenM = 0;
+      let prevAll = null;
+      for (const p of points) {
+        if (p?.lat == null) continue;
+        const q = { lat: p.lat, lon: p.lon };
+        if (prevAll) lenM += moveM(prevAll, q);
+        prevAll = q;
+        const kept = pts[pts.length - 1];
+        if (!kept || moveM(kept, q) >= COVER_SAMPLE_M) pts.push(q);
+      }
+      if (prevAll && pts[pts.length - 1] !== prevAll) pts.push(prevAll);
+      if (pts.length < 2) return;
+      // Direction of travel at each sample — trace-seed fallback (see
+      // ensureTraced) needs a heading to march from.
+      pts.forEach((q, i) => {
+        q.heading = bearingDeg(pts[Math.max(0, i - 1)], pts[Math.min(pts.length - 1, i + 1)]);
+      });
+      coverPts = pts;
+      // Room for the whole track plus the usual trace margin at both ends,
+      // never below extendCourse's own default cap (400) or a cap already
+      // raised by an earlier cover().
+      stationCap = Math.min(
+        COVER_MAX_STATIONS,
+        Math.max(stationCap ?? 0, 400, Math.ceil(lenM / STEP_M) + 8 * END_GUARD)
+      );
+      ensureTraced(); // an anchor whose trace failed may now seed from the track
+      ensureCover();
     },
     // Immediate re-fetch after a failure, without waiting out the backoff.
     retry() {
@@ -302,6 +450,7 @@ export function createCourseOverlay(map, onStatus = null) {
     destroy() {
       destroyed = true;
       unsubMarks();
+      map.off('zoomend', applyDash);
       [...casings, ...cores].forEach((l) => l.remove());
     },
   };

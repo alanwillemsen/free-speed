@@ -6,7 +6,7 @@
 //
 // All math happens in the planar metre frame produced by utils/water.js.
 
-const STEP_M = 25; // station spacing along the channel
+export const STEP_M = 25; // station spacing along the channel
 const TRACE_M = 2000; // initial trace reach, each way. The course is traced
 // once and then only ever EXTENDED at its far ends — the shore doesn't move,
 // so the drawn lines never do either
@@ -588,9 +588,10 @@ export function traceCourse(water, lat, lon, headingDeg, prevMemory = null) {
 // station, 'behind' = the first). `water` must cover that end — fetch the
 // cell of a point just beyond it. Returns the full rebuilt course, or null
 // when the water genuinely stops there. Existing geometry is preserved; only
-// the far end (off screen) gains stations, and past MAX_STATIONS the
-// opposite end is trimmed.
-export function extendCourse(water, stationsLatLon, end, prevMemory = null) {
+// the far end (off screen) gains stations, and past `maxStations` the
+// opposite end is trimmed (review maps covering a long recording raise the
+// cap; live maps keep the default).
+export function extendCourse(water, stationsLatLon, end, prevMemory = null, maxStations = MAX_STATIONS) {
   if (!water || water.rings.length === 0 || stationsLatLon.length < 2) return null;
   const toXY = ([la, lo]) => water.frame.toXY(la, lo);
   const sts = stationsLatLon.map((s) => ({
@@ -614,9 +615,9 @@ export function extendCourse(water, stationsLatLon, end, prevMemory = null) {
     ? sts.concat(ext)
     : ext.map((s) => ({ ...s, l: s.r, r: s.l })).reverse().concat(sts);
   let trimmed = false;
-  if (all.length > MAX_STATIONS) {
+  if (all.length > maxStations) {
     trimmed = true;
-    all = ahead ? all.slice(all.length - MAX_STATIONS) : all.slice(0, MAX_STATIONS);
+    all = ahead ? all.slice(all.length - maxStations) : all.slice(0, maxStations);
   }
   return buildResult(water, all, memory, trimmed);
 }
