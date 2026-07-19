@@ -1549,6 +1549,24 @@ body {
   min-height: 0;
 }
 
+/* Quiet time-of-day readout opposite the controls — muted colour but
+   distance-number sized, so it reads without glasses. The size lives in a
+   variable because the layout rows below pad by it to stay clear. */
+.bigscreen {
+  --clock-size: clamp(2rem, 7.5vh, 5rem);
+}
+.bigscreen-clock {
+  position: absolute;
+  top: calc(env(safe-area-inset-top) + 0.6rem);
+  left: calc(env(safe-area-inset-left) + 0.75rem);
+  font-size: var(--clock-size);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  z-index: 2;
+  pointer-events: none;
+}
+
 .bigscreen-controls {
   position: absolute;
   top: calc(env(safe-area-inset-top) + 0.5rem);
@@ -1777,8 +1795,9 @@ button.bignav-course-status {
    numbers sit on the left of a shorter graph. Height binds, so size in vh. */
 @media (orientation: landscape) {
   .bigscreen-toprow {
-    /* Clear the top-right control buttons (2.6rem at a 0.5rem offset). */
-    padding: 3.1rem 4vw 0;
+    /* Clear the top-right control buttons (2.6rem at a 0.5rem offset) and the
+       top-left clock, whichever is taller. */
+    padding: max(3.1rem, calc(var(--clock-size) + 1rem)) 4vw 0;
   }
   .bigscreen-body { flex-direction: row; align-items: stretch; }
   .bigscreen-metrics {
@@ -1809,7 +1828,7 @@ button.bignav-course-status {
     flex-wrap: wrap;
     align-content: space-evenly;
     gap: 0 4vw;
-    padding: calc(env(safe-area-inset-top) + 0.5rem) 0 1vh 4vw;
+    padding: calc(env(safe-area-inset-top) + var(--clock-size) + 0.8rem) 0 1vh 4vw;
     box-sizing: border-box;
   }
   .bigscreen.panel-map .bigscreen-metric { flex: 0 0 calc(50% - 2vw); box-sizing: border-box; padding-right: 1vw; }
@@ -1824,9 +1843,11 @@ button.bignav-course-status {
 /* Portrait: split + SPM span the top, big; free speed + distance side by side
    below them, then the profile fills the rest. Width binds, so size in vw. */
 @media (orientation: portrait) {
+  .bigscreen { --clock-size: clamp(1.8rem, 7vw, 4rem); }
   .bigscreen-toprow {
-    /* Drop below the control buttons (2.6rem tall at a 0.5rem offset). */
-    padding: calc(env(safe-area-inset-top) + 3.4rem) 4vw 0;
+    /* Drop below the control buttons (2.6rem tall at a 0.5rem offset) or the
+       clock, whichever is taller. */
+    padding: calc(env(safe-area-inset-top) + max(3.4rem, var(--clock-size) + 1rem)) 4vw 0;
   }
   .bigscreen-body { flex-direction: column; }
   .bigscreen-metrics {
@@ -1853,7 +1874,7 @@ button.bignav-course-status {
   .bigscreen.panel-map .bigscreen-metrics {
     flex-wrap: wrap;
     row-gap: 1.5vh;
-    padding-top: calc(env(safe-area-inset-top) + 3.4rem);
+    padding-top: calc(env(safe-area-inset-top) + max(3.4rem, var(--clock-size) + 1rem));
   }
   .bigscreen.panel-map .bigscreen-metric { flex: 0 0 42%; }
   .bigscreen.panel-map .bigscreen-split,

@@ -53,6 +53,14 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
   const c = THEMES[theme];
   const rootRef = useRef(null);
 
+  // Wall-clock time in the corner — outings are timed against club schedules
+  // and daylight, and the phone's status bar is hidden in full screen.
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
   // Long-press the piece distance to reset it (start a new piece). ~600 ms so a
   // stray tap on the water doesn't zero it. Brief flash confirms the reset.
   const holdTimerRef = useRef(null);
@@ -267,6 +275,10 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
       className={`bigscreen theme-${theme}${panel === 'map' ? ' panel-map' : ''}`}
       style={{ background: c.bg, color: c.fg }}
     >
+      <div className="bigscreen-clock" style={{ color: c.muted }}>
+        {now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+      </div>
+
       <div className="bigscreen-controls">
         <button
           className="bigscreen-ctrl"
