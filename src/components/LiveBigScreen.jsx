@@ -328,7 +328,7 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
 
         <div className="bigscreen-graph">
           {panel === 'map'
-            ? <NavMap track={track || []} accent={c.accent} trackColor={c.last} />
+            ? <NavMap track={track || []} trackColor={c.last} />
             : <Line data={bigData} options={bigOptions} />}
         </div>
       </div>

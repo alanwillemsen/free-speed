@@ -17,23 +17,31 @@ import { createBasemapLayers, getBasemap, toggleBasemap, subscribeBasemap } from
 // heading, which the container rotation cancels to a constant screen-down.
 const HEADING_RAY_M = 50;
 
+// Boat dot + heading ray color. Deliberately NOT the theme accent: chartplotter
+// magenta (the marine/aviation course-line convention) is the one saturated hue
+// that occurs in neither water, terrain, nor basemap styling, so it stays
+// readable in direct sun on OSM blue and satellite dark green alike — where the
+// sun theme's navy sank into the water and the dark theme's yellow collided
+// with the bank lines.
+const NAV_COLOR = '#ff00cc';
+
 // Chevron marking the far end of the heading ray. Drawn pointing north (up)
 // and rotated to the heading like the map, so on screen it always points down.
-function chevronIcon(heading, color) {
+function chevronIcon(heading) {
   return L.divIcon({
     className: 'bignav-marker',
     html:
       `<div class="bignav-marker-rot" style="transform:rotate(${heading}deg)">` +
-      '<svg width="30" height="30" viewBox="0 0 24 24" aria-hidden="true">' +
+      '<svg width="38" height="38" viewBox="0 0 24 24" aria-hidden="true">' +
       '<path d="M5 17 L12 7 L19 17" fill="none" stroke="#ffffff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>' +
-      `<path d="M5 17 L12 7 L19 17" fill="none" stroke="${color}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>` +
+      `<path d="M5 17 L12 7 L19 17" fill="none" stroke="${NAV_COLOR}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>` +
       '</svg></div>',
-    iconSize: [30, 30],
-    iconAnchor: [15, 15],
+    iconSize: [38, 38],
+    iconAnchor: [19, 19],
   });
 }
 
-function NavMap({ track, accent, trackColor }) {
+function NavMap({ track, trackColor }) {
   const wrapRef = useRef(null);
   const rotorRef = useRef(null);
   const mapRef = useRef(null);
@@ -84,11 +92,14 @@ function NavMap({ track, accent, trackColor }) {
     const marks = createMarkOverlay(map);
     marks.setMarks(loadMarks());
     const unsubMarks = subscribeMarks((m) => marks.setMarks(m));
-    const ray = L.polyline([], { weight: 5, opacity: 0.95 });
-    const dot = L.circleMarker([0, 0], { radius: 9, color: '#ffffff', weight: 3, fillOpacity: 1 });
+    // White casing under the ray, same trick as the course lines: in glare the
+    // edge contrast survives long after the hue does.
+    const rayCase = L.polyline([], { weight: 11, opacity: 0.95, color: '#ffffff' });
+    const ray = L.polyline([], { weight: 6, opacity: 1, color: NAV_COLOR });
+    const dot = L.circleMarker([0, 0], { radius: 10, color: '#ffffff', weight: 3, fillColor: NAV_COLOR, fillOpacity: 1 });
     const tip = L.marker([0, 0], { interactive: false, zIndexOffset: 1000 });
     map.setView([0, 0], 2);
-    mapRef.current = { map, line, ray, dot, tip, course, hasView: false };
+    mapRef.current = { map, line, rayCase, ray, dot, tip, course, hasView: false };
     const ro = new ResizeObserver(([entry]) => {
       const { width, height } = entry.contentRect;
       wrapHeightRef.current = height;
@@ -126,7 +137,6 @@ function NavMap({ track, accent, trackColor }) {
     if (!m || lat == null) return;
 
     m.dot.setLatLng([lat, lon]);
-    m.dot.setStyle({ fillColor: accent });
     if (!m.map.hasLayer(m.dot)) m.dot.addTo(m.map);
     m.course.update({ lat, lon, heading });
 
@@ -136,11 +146,18 @@ function NavMap({ track, accent, trackColor }) {
     let center = [lat, lon];
     if (heading != null) {
       const ahead = destinationPoint(lat, lon, heading, HEADING_RAY_M);
+      m.rayCase.setLatLngs([[lat, lon], [ahead.lat, ahead.lon]]);
       m.ray.setLatLngs([[lat, lon], [ahead.lat, ahead.lon]]);
-      m.ray.setStyle({ color: accent });
       m.tip.setLatLng([ahead.lat, ahead.lon]);
-      m.tip.setIcon(chevronIcon(heading, accent));
-      if (!m.map.hasLayer(m.ray)) { m.ray.addTo(m.map); m.tip.addTo(m.map); }
+      m.tip.setIcon(chevronIcon(heading));
+      if (!m.map.hasLayer(m.ray)) {
+        m.rayCase.addTo(m.map);
+        m.ray.addTo(m.map);
+        m.tip.addTo(m.map);
+        // The ray starts at the boat, so its casing would otherwise stripe
+        // across the dot added on an earlier fix.
+        m.dot.bringToFront();
+      }
       // Rotate so the heading lands at 180° on screen (course-down), stepping
       // by the shortest arc from wherever the dial currently is.
       const target = 180 - heading;
@@ -158,6 +175,7 @@ function NavMap({ track, accent, trackColor }) {
       center = destinationPoint(lat, lon, heading, aheadM);
       center = [center.lat, center.lon];
     } else {
+      m.rayCase.remove();
       m.ray.remove();
       m.tip.remove();
     }
@@ -175,7 +193,7 @@ function NavMap({ track, accent, trackColor }) {
     // `side` is a dep so the boat-ahead offset (a fraction of the measured
     // wrapper height) is reapplied once the ResizeObserver reports a size —
     // the first fix can land before it fires.
-  }, [lat, lon, heading, zoom, accent, side]);
+  }, [lat, lon, heading, zoom, side]);
 
   return (
     <div ref={wrapRef} className="bignav">

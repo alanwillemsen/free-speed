@@ -1702,12 +1702,13 @@ body {
   border: none;
   filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
 }
-/* The rotating wrapper must be exactly the icon's declared 30×30 box — an
-   inline SVG's baseline gap would grow it and shift the rotation center off
-   the marker anchor, drawing the chevron beside the ray instead of on it. */
+/* The rotating wrapper must be exactly the icon's declared box (Leaflet sets
+   the marker root to iconSize; 100% follows it) — an inline SVG's baseline gap
+   would grow it and shift the rotation center off the marker anchor, drawing
+   the chevron beside the ray instead of on it. */
 .bignav-marker-rot {
-  width: 30px;
-  height: 30px;
+  width: 100%;
+  height: 100%;
 }
 .bignav-marker-rot svg {
   display: block;
