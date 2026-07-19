@@ -9,13 +9,13 @@ import { createBasemapLayers, getBasemap, toggleBasemap, subscribeBasemap } from
 
 // Course-down navigation map for the big screen. The rower faces the stern,
 // so the display keeps the direction of travel pointing DOWN: the whole map
-// rotates under a fixed boat dot, and a 75 m heading ray shows where the hull
+// rotates under a fixed boat dot, and a 50 m heading ray shows where the hull
 // is pointed without the rower turning their head. Leaflet can't rotate a map
 // natively, so the trick is an oversized square container (side = the
 // wrapper's diagonal, so no corners show) spun with a CSS transform; markers
 // counter-rotate implicitly because their icons are rotated by the compass
 // heading, which the container rotation cancels to a constant screen-down.
-const HEADING_RAY_M = 75;
+const HEADING_RAY_M = 50;
 
 // Chevron marking the far end of the heading ray. Drawn pointing north (up)
 // and rotated to the heading like the map, so on screen it always points down.
