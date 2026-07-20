@@ -7,6 +7,7 @@ import LiveCapture from './components/LiveCapture';
 import OarCapture from './components/OarCapture';
 import VideoAnalysis from './components/VideoAnalysis';
 import Tradeoffs from './components/Tradeoffs';
+import Sessions from './components/Sessions';
 import CourseMarks from './components/CourseMarks';
 import AppShell from './components/AppShell';
 import { offsetCurveToAverage } from './utils/curves';
@@ -25,8 +26,11 @@ function App() {
     if (h === '#calculator' || h.startsWith('#s=')) return 'calculator';
     if (h === '#oar' || h.startsWith('#oar?')) return 'oar';
     if (h === '#analyze' || h.startsWith('#analyze?')) return 'analyze';
+    if (h === '#strokes') return 'strokes';
+    if (h === '#sessions') return 'sessions';
     if (h === '#tradeoffs') return 'tradeoffs';
     if (h === '#course' || h.startsWith('#course?')) return 'course';
+    if (h === '#link') return 'live'; // live page with the link-setup panel open
     return 'live'; // home page (covers '' and legacy #live links)
   };
   const [activePage, setActivePage] = useState(pageFromHash);
@@ -191,27 +195,28 @@ function App() {
   const energyBNorm = calculateEnergy(curveBNormalized.times, curveBNormalized.speeds);
   const penalty = calculateEnergyPenalty(energyBNorm * raceTime, energyA * raceTime);
 
-  if (activePage === 'live') {
-    return <LiveCapture />;
-  }
-
-  if (activePage === 'oar') {
-    return <OarCapture />;
-  }
-
-  if (activePage === 'analyze') {
-    return <VideoAnalysis />;
-  }
-
-  if (activePage === 'tradeoffs') {
-    return <Tradeoffs />;
-  }
-
-  if (activePage === 'course') {
-    return <CourseMarks />;
-  }
+  // The live capture page stays mounted whatever page is showing, so a rower's
+  // capture keeps running in the background while they look at other pages (the
+  // pipeline pauses itself off the water). Hiding instead of unmounting keeps
+  // the sensor listeners, GPS watch, recording, and coach link alive. The
+  // Stroke Analysis page is the same component in its analysis variant — a
+  // separate instance, so loading a file never clobbers a running capture.
+  const otherPage =
+    activePage === 'strokes' ? <LiveCapture variant="analysis" /> :
+    activePage === 'sessions' ? <Sessions /> :
+    activePage === 'oar' ? <OarCapture /> :
+    activePage === 'analyze' ? <VideoAnalysis /> :
+    activePage === 'tradeoffs' ? <Tradeoffs /> :
+    activePage === 'course' ? <CourseMarks /> :
+    null;
 
   return (
+    <>
+    <div style={activePage === 'live' ? undefined : { display: 'none' }}>
+      <LiveCapture active={activePage === 'live'} />
+    </div>
+    {otherPage}
+    {activePage === 'calculator' && (
     <AppShell page="calculator" title="Rowing Efficiency Calculator">
     <div className="app">
       <div className="app-content">
@@ -288,6 +293,8 @@ function App() {
       </div>
     </div>
     </AppShell>
+    )}
+    </>
   );
 }
 

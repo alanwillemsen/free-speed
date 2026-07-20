@@ -136,6 +136,47 @@ export function findStrokeAt(strokes, rowerTime) {
   return rowerTime >= s.startTime && rowerTime <= s.time ? s : null;
 }
 
+// --- Roll (boat heel / set) ---
+
+// A time series of the boat's lateral lean for the analyzer's tilt indicator,
+// taken from the rower phone's device-orientation stream. `gamma` is the
+// left-right tilt (degrees); `beta` would be fore-aft pitch. We recentre on the
+// median so an arbitrary phone-mount offset reads as level and the graphic shows
+// heel *relative* to the boat's own average set. Returns [] when there's no
+// orientation data (older bundles, permission denied). Same `t` domain as
+// strokes, so rowerTime from videoTimeToRowerTime indexes straight in.
+export function deriveRoll(meta) {
+  const src = meta?.orientation;
+  if (!Array.isArray(src) || src.length === 0) return [];
+  const samples = [];
+  for (const s of src) {
+    if (s == null || s.gamma == null || s.t == null) continue;
+    samples.push({ t: s.t, roll: s.gamma });
+  }
+  if (samples.length === 0) return [];
+  samples.sort((a, b) => a.t - b.t);
+  const median = [...samples].map((p) => p.roll).sort((a, b) => a - b)[samples.length >> 1];
+  for (const p of samples) p.roll -= median;
+  return samples;
+}
+
+// Interpolated roll (degrees, +starboard) at rowerTime, or null with no data.
+export function rollAt(samples, t) {
+  if (!samples || samples.length === 0) return null;
+  if (t <= samples[0].t) return samples[0].roll;
+  const last = samples[samples.length - 1];
+  if (t >= last.t) return last.roll;
+  let lo = 0, hi = samples.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (samples[mid].t < t) lo = mid + 1; else hi = mid - 1;
+  }
+  const a = samples[lo - 1], b = samples[lo];
+  const span = b.t - a.t;
+  const f = span > 0 ? (t - a.t) / span : 0;
+  return a.roll + (b.roll - a.roll) * f;
+}
+
 // --- Overlay rendering (shared: analyzer + burn-in export) ---
 
 function formatSplit(seconds) {

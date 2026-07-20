@@ -28,22 +28,44 @@ const THEMES = {
 
 // Persisted panel choice (map vs. stroke graph) for the big-screen readout.
 const PANEL_KEY = 'freespeed_bigscreen_panel';
+// Persisted day/night choice, shared between the embedded and full-screen
+// readouts so flipping between them doesn't lose the toggle.
+const THEME_KEY = 'freespeed_bigscreen_theme';
 
-function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strokeRate, pieceDistance, sessionDistance, onResetPiece, chartData, hasGPSAnchoring, track, onClose }) {
-  // Seed from the app theme (dark app → dark readout for night rows), then let
-  // the rower flip it with the on-screen toggle — at arm's length in changing
-  // light they may want the opposite of the app chrome.
-  const [theme, setTheme] = useState(() => (resolveTheme() === 'dark' ? 'dark' : 'sun'));
+// `embedded` renders the same readout inline as the live page's body (under
+// the app bar, above the stop control) instead of as a full-screen overlay:
+// no fullscreen/orientation requests, and the ✕ becomes a ⛶ that hands off to
+// the real full-screen instance via onEnterFullscreen.
+function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strokeRate, pieceDistance, sessionDistance, onResetPiece, chartData, hasGPSAnchoring, track, onClose, embedded = false, onEnterFullscreen, defaultPanel = 'map', onRecordVideo }) {
+  // Seed from the last choice, else the app theme (dark app → dark readout for
+  // night rows), then let the rower flip it with the on-screen toggle — at
+  // arm's length in changing light they may want the opposite of the app chrome.
+  const [theme, setTheme] = useState(() => {
+    try {
+      const t = localStorage.getItem(THEME_KEY);
+      if (t === 'dark' || t === 'sun') return t;
+    } catch { /* private mode */ }
+    return resolveTheme() === 'dark' ? 'dark' : 'sun';
+  });
+  const toggleTheme = () => setTheme((t) => {
+    const next = t === 'sun' ? 'dark' : 'sun';
+    try { localStorage.setItem(THEME_KEY, next); } catch { /* private mode */ }
+    return next;
+  });
   // Locked orientation while full-screen. Defaults to landscape (the wide
   // readout layout); the rotate button toggles it. The CSS layout follows the
   // real orientation, so locking portrait re-flows the numbers above the graph.
   const [orientation, setOrientation] = useState('landscape');
   // The graph panel doubles as a course-down navigation map — the rower faces
-  // the stern, so the map steers for them (see NavMap). Map by default; the
-  // last choice sticks across sessions so the readout opens the way they row.
+  // the stern, so the map steers for them (see NavMap). `defaultPanel` seeds
+  // the first choice per caller (a rower steers → map; a coach watches the
+  // stroke → graph); the last explicit toggle sticks across sessions.
   const [panel, setPanel] = useState(() => {
-    try { return localStorage.getItem(PANEL_KEY) === 'graph' ? 'graph' : 'map'; }
-    catch { return 'map'; }
+    try {
+      const p = localStorage.getItem(PANEL_KEY);
+      if (p === 'graph' || p === 'map') return p;
+    } catch { /* private mode */ }
+    return defaultPanel;
   });
   const togglePanel = () => setPanel((p) => {
     const next = p === 'graph' ? 'map' : 'graph';
@@ -98,6 +120,7 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
   // full-screen on phones; the fixed-position overlay still covers the viewport
   // (and the whole screen as an installed PWA), so that degrades gracefully too.
   useEffect(() => {
+    if (embedded) return; // inline readout: no fullscreen or orientation lock
     const el = rootRef.current;
     (async () => {
       try { if (el?.requestFullscreen) await el.requestFullscreen(); } catch { /* ignore */ }
@@ -108,7 +131,7 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
       try { screen.orientation?.unlock?.(); } catch { /* ignore */ }
       try { if (document.fullscreenElement) document.exitFullscreen(); } catch { /* ignore */ }
     };
-  }, []);
+  }, [embedded]);
 
   // Rotate button: flip the locked orientation. We're already full-screen here,
   // so the lock applies immediately; the layout re-flows via CSS. On platforms
@@ -122,10 +145,11 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
   // If the user leaves full-screen via a system gesture (swipe / Esc), keep
   // React state in sync by closing the overlay.
   useEffect(() => {
+    if (embedded) return;
     const onFs = () => { if (!document.fullscreenElement) onClose(); };
     document.addEventListener('fullscreenchange', onFs);
     return () => document.removeEventListener('fullscreenchange', onFs);
-  }, [onClose]);
+  }, [onClose, embedded]);
 
   // Recolour and thicken the shared chart datasets for distance reading.
   // The outdoor readout drops the running average — at arm's length the latest
@@ -272,7 +296,7 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
   return (
     <div
       ref={rootRef}
-      className={`bigscreen theme-${theme}${panel === 'map' ? ' panel-map' : ''}`}
+      className={`bigscreen theme-${theme}${panel === 'map' ? ' panel-map' : ''}${embedded ? ' bigscreen-embedded' : ''}`}
       style={{ background: c.bg, color: c.fg }}
     >
       <div className="bigscreen-clock" style={{ color: c.muted }}>
@@ -280,14 +304,16 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
       </div>
 
       <div className="bigscreen-controls">
-        <button
-          className="bigscreen-ctrl"
-          onClick={toggleOrientation}
-          aria-label={`Switch to ${orientation === 'landscape' ? 'portrait' : 'landscape'}`}
-          title="Rotate"
-        >
-          {'⟳'}
-        </button>
+        {!embedded && (
+          <button
+            className="bigscreen-ctrl"
+            onClick={toggleOrientation}
+            aria-label={`Switch to ${orientation === 'landscape' ? 'portrait' : 'landscape'}`}
+            title="Rotate"
+          >
+            {'⟳'}
+          </button>
+        )}
         <button
           className="bigscreen-ctrl"
           onClick={togglePanel}
@@ -296,16 +322,38 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
         >
           {panel === 'graph' ? '⌖' : '∿'}
         </button>
+        {onRecordVideo && (
+          <button
+            className="bigscreen-ctrl bigscreen-ctrl-rec"
+            onClick={onRecordVideo}
+            aria-label="Record video"
+            title="Record video"
+          >
+            <span className="bigscreen-ctrl-rec-dot" aria-hidden="true" />
+            {'REC'}
+          </button>
+        )}
         <button
           className="bigscreen-ctrl"
-          onClick={() => setTheme((t) => (t === 'sun' ? 'dark' : 'sun'))}
+          onClick={toggleTheme}
           aria-label="Toggle day/night"
         >
           {theme === 'sun' ? '☾' : '☀'}
         </button>
-        <button className="bigscreen-ctrl" onClick={onClose} aria-label="Exit full screen">
-          {'✕'}
-        </button>
+        {embedded ? (
+          <button
+            className="bigscreen-ctrl"
+            onClick={onEnterFullscreen}
+            aria-label="Full-screen display"
+            title="Full-screen display"
+          >
+            {'⛶'}
+          </button>
+        ) : (
+          <button className="bigscreen-ctrl" onClick={onClose} aria-label="Exit full screen">
+            {'✕'}
+          </button>
+        )}
       </div>
 
       {/* Graph mode: split (left) and SPM (right) span the full width up top —

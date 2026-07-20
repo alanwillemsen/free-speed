@@ -15,6 +15,29 @@ const PEER_ID_RETRIES = 5;
 // quietly instead of dead-ending in 'error', so a rower already on the water
 // reconnects on its own once signalling recovers.
 const TRANSIENT_BROKER_ERRORS = new Set(['network', 'socket-error', 'socket-closed', 'server-error']);
+// Errors that no amount of retrying can fix (platform / config, not weather).
+// Everything else is eligible for the self-healing watchdog below.
+const PERMANENT_ERRORS = new Set(['browser-incompatible', 'invalid-id', 'invalid-key', 'ssl-unavailable']);
+// Watchdog cadence, and the tick-to-tick gap that means "this page was just
+// suspended long enough that the broker may have reaped us" (brokers reap at
+// ~60 s of missed heartbeats; anything over this is already suspicious).
+const WATCHDOG_MS = 10000;
+const SUSPEND_GAP_MS = 30000;
+// Data-channel heartbeat. WebRTC gives no timely close event when the other
+// end freezes or drops off — the connection just goes silent while both sides
+// still report open. Each side pings over the link; a side that has heard
+// nothing (pings, pongs, or real data all count) for CONN_STALE_MS declares
+// the channel dead and closes it, which feeds the normal reconnect paths.
+const HEARTBEAT_MS = 5000;
+const CONN_STALE_MS = 15000;
+// How long we give an initiated dial to reach 'open' before treating it as
+// failed and redialing. PeerJS has no connect timeout of its own, and a dial to
+// a peer that froze while still ghost-registered on the broker never gets a
+// 'peer-unavailable' either — the broker relays the offer to a page that will
+// never answer, so the attempt hangs forever with no event. Without this, the
+// coach's redial after the rower's freeze stalls on a dead pending connection
+// and never recovers even after the rower re-registers.
+const DIAL_TIMEOUT_MS = 12000;
 
 function makeShortCode() {
   // 5-digit numeric code: easy to read out loud, easy to type.
@@ -64,11 +87,15 @@ function parseJoinFromHash(page) {
   return m ? m[1] : null;
 }
 
-function buildJoinUrl(page, shortCode) {
-  return `${window.location.origin}${window.location.pathname}#${page}?join=${shortCode}`;
+function buildJoinUrl(page, shortCode, inviteRole) {
+  const base = `${window.location.origin}${window.location.pathname}#${page}?join=${shortCode}`;
+  // `as` tells the opener which role the sender is inviting them into (the
+  // page's onJoin reads it) — a coach's invite makes the opener a rower and
+  // vice versa. Omitted for pages without roles (oar).
+  return inviteRole ? `${base}&as=${inviteRole}` : base;
 }
 
-export function usePeerLink({ page, onData, onOpen, onClose, onJoin, fixedId, getPresence }) {
+export function usePeerLink({ page, onData, onOpen, onClose, onJoin, fixedId, getPresence, inviteRole }) {
   const [myPeerId, setMyPeerId] = useState('');
   const [remoteShortCode, setRemoteShortCode] = useState('');
   const [peerStatus, setPeerStatus] = useState('idle'); // idle | initializing | online | connecting | connected | error
@@ -99,6 +126,20 @@ export function usePeerLink({ page, onData, onOpen, onClose, onJoin, fixedId, ge
   // while the first is still mid-handshake (e.g. React StrictMode double-invoking
   // an auto-enable effect, or a manual tap racing it). Reset only on a fatal error.
   const startedRef = useRef(false);
+  // Self-healing bookkeeping: whether the link was ever enabled this session
+  // (the watchdog only revives what the user turned on), whether we hit an
+  // unfixable error (stop trying), and a stable handle on ensureAlive so
+  // timers and peer callbacks created in older closures can reach the
+  // current revive logic.
+  const everStartedRef = useRef(false);
+  const permanentErrorRef = useRef(false);
+  const ensureAliveRef = useRef(null);
+  const lastAliveTickRef = useRef(Date.now());
+  // Heartbeat over the live data channel (see HEARTBEAT_MS above).
+  const heartbeatTimerRef = useRef(null);
+  const lastHeardRef = useRef(0);
+  // Watches an initiated dial that hasn't reached 'open' yet (see DIAL_TIMEOUT_MS).
+  const dialTimeoutRef = useRef(null);
 
   // Keep latest callbacks reachable from stable connection handlers without
   // rebuilding the peer each render.
@@ -142,11 +183,33 @@ export function usePeerLink({ page, onData, onOpen, onClose, onJoin, fixedId, ge
     conn.on('open', () => {
       reconnectAttemptsRef.current = 0; // healthy link — reset backoff
       if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null; }
+      if (dialTimeoutRef.current) { clearTimeout(dialTimeoutRef.current); dialTimeoutRef.current = null; }
       setConnectedPeerId(conn.peer);
       setPeerStatus('connected');
+      // Start the liveness heartbeat for this connection. The interval both
+      // pings and checks staleness; it self-cancels once it's no longer the
+      // active connection (a zombie's own close event may never fire).
+      lastHeardRef.current = Date.now();
+      if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
+      heartbeatTimerRef.current = setInterval(() => {
+        if (connRef.current !== conn || !conn.open) {
+          clearInterval(heartbeatTimerRef.current);
+          heartbeatTimerRef.current = null;
+          return;
+        }
+        if (Date.now() - lastHeardRef.current > CONN_STALE_MS) {
+          // Silent for too long: the other end froze or vanished without a
+          // close event. Close locally — the close handler runs the normal
+          // teardown and, on the dialing side, the redial loop.
+          try { conn.close(); } catch { /* ignore */ }
+          return;
+        }
+        try { conn.send({ type: 'ping', t: 'hb' }); } catch { /* ignore */ }
+      }, HEARTBEAT_MS);
       onOpenRef.current?.(conn);
     });
     conn.on('data', (msg) => {
+      lastHeardRef.current = Date.now();
       if (!msg || typeof msg !== 'object') return;
       if (msg.type === 'ping') {
         try { conn.send({ type: 'pong', t: msg.t }); } catch { /* ignore */ }
@@ -162,6 +225,7 @@ export function usePeerLink({ page, onData, onOpen, onClose, onJoin, fixedId, ge
       onDataRef.current?.(msg);
     });
     conn.on('close', () => {
+      if (dialTimeoutRef.current) { clearTimeout(dialTimeoutRef.current); dialTimeoutRef.current = null; }
       connRef.current = null;
       setConnectedPeerId('');
       onCloseRef.current?.();
@@ -173,6 +237,7 @@ export function usePeerLink({ page, onData, onOpen, onClose, onJoin, fixedId, ge
       }
     });
     conn.on('error', (err) => {
+      if (dialTimeoutRef.current) { clearTimeout(dialTimeoutRef.current); dialTimeoutRef.current = null; }
       setPeerError(String(err?.message ?? err));
       // A transient data-channel error on an initiated link → retry rather than
       // dead-end in 'error'.
@@ -184,6 +249,11 @@ export function usePeerLink({ page, onData, onOpen, onClose, onJoin, fixedId, ge
   const initPeer = useCallback(() => {
     if (peerRef.current || startedRef.current) return;
     startedRef.current = true;
+    everStartedRef.current = true;
+    intentionalRef.current = false; // enabling the link is explicit intent to be online
+    // A fresh claim sequence supersedes any broker retry an older, dead
+    // generation scheduled — let it fire and two peers race for the same id.
+    if (brokerRetryTimerRef.current) { clearTimeout(brokerRetryTimerRef.current); brokerRetryTimerRef.current = null; }
     setPeerStatus('initializing');
     setPeerError('');
 
@@ -221,6 +291,9 @@ export function usePeerLink({ page, onData, onOpen, onClose, onJoin, fixedId, ge
         if (brokerRetryTimerRef.current) { clearTimeout(brokerRetryTimerRef.current); brokerRetryTimerRef.current = null; }
         setMyPeerId(id);
         setPeerStatus('online');
+        // If we're the dialing side and the data channel didn't survive
+        // whatever killed the old peer, pick the redial loop back up.
+        if (lastTargetRef.current && !connRef.current?.open) scheduleReconnect();
       });
       peer.on('connection', (conn) => {
         // Presence probe (see `probe`): answer with our advertised name + busy
@@ -238,6 +311,19 @@ export function usePeerLink({ page, onData, onOpen, onClose, onJoin, fixedId, ge
         setPeerStatus('connecting');
       });
       peer.on('error', (err) => {
+        if (opened && err?.type === 'unavailable-id') {
+          // Re-registering after a freeze/sleep while the broker still holds
+          // our previous session as a ghost: reconnect() gets rejected even
+          // though it's our own id. Drop this peer and let the watchdog
+          // re-claim once the ghost expires (seconds) — never dead-end here,
+          // a rower mid-row can't reach the phone to fix it.
+          try { peer.destroy(); } catch { /* ignore */ }
+          if (peerRef.current === peer) peerRef.current = null;
+          startedRef.current = false;
+          setPeerStatus('reconnecting');
+          setTimeout(() => ensureAliveRef.current?.(), 3000);
+          return;
+        }
         if (!opened && err?.type === 'unavailable-id') {
           // Id already held on the broker — usually our own just-closed/reloaded
           // tab still lingering (the broker frees it within a few seconds). Retry
@@ -263,7 +349,18 @@ export function usePeerLink({ page, onData, onOpen, onClose, onJoin, fixedId, ge
         // A failed dial to an offline/unknown peer (probe or a stale reconnect
         // target) surfaces here as 'peer-unavailable'. That's not fatal to our
         // own peer — swallow it so presence probing and reconnects can continue.
-        if (err?.type === 'peer-unavailable') return;
+        // But if it was our *initiated* dial that failed (the error names our
+        // target), keep redialing with backoff instead of hanging in
+        // 'Connecting…' forever — a coach often dials before the rower's phone
+        // has (re)registered with the broker, and this way the link completes
+        // by itself the moment the rower comes online.
+        if (err?.type === 'peer-unavailable') {
+          const target = lastTargetRef.current;
+          if (target && !connRef.current?.open && String(err?.message ?? '').includes(target)) {
+            scheduleReconnect();
+          }
+          return;
+        }
 
         // Lost / never reached the signalling server. Not an error to surface —
         // keep the link alive and retry in the background. If we were already
@@ -280,7 +377,11 @@ export function usePeerLink({ page, onData, onOpen, onClose, onJoin, fixedId, ge
           return;
         }
 
-        startedRef.current = false; // allow a manual re-enable
+        // Anything else is fatal for this peer object. Truly permanent causes
+        // (incompatible browser, bad config) stop the watchdog; the rest stay
+        // eligible for an automatic rebuild on its next tick.
+        if (PERMANENT_ERRORS.has(err?.type)) permanentErrorRef.current = true;
+        startedRef.current = false; // allow a re-enable (manual or watchdog)
         setPeerError(String(err?.message ?? err));
         setPeerStatus('error');
       });
@@ -298,6 +399,63 @@ export function usePeerLink({ page, onData, onOpen, onClose, onJoin, fixedId, ge
     tryClaim();
   }, [setupConnHandlers, scheduleReconnect]);
 
+  // Revive the link after anything that silently killed it: reconnect a
+  // disconnected peer, rebuild a destroyed or dead-ended one. Idempotent and
+  // cheap, so it's safe to call on every wake signal / watchdog tick — it
+  // no-ops while healthy, while a claim is already in flight (startedRef set,
+  // peer pending), and when the link was never enabled, was torn down on
+  // purpose, or died of something retrying can't fix.
+  const ensureAlive = useCallback(() => {
+    const gap = Date.now() - lastAliveTickRef.current;
+    lastAliveTickRef.current = Date.now();
+    if (intentionalRef.current || !everStartedRef.current || permanentErrorRef.current) return;
+    const peer = peerRef.current;
+    if (peer) {
+      if (peer.destroyed) {
+        peerRef.current = null;
+        startedRef.current = false;
+        initPeer();
+      } else if (peer.disconnected) {
+        try { peer.reconnect(); } catch { /* ignore */ }
+      } else if (gap > SUSPEND_GAP_MS) {
+        // The page just resumed from a long suspension (frozen tab, locked
+        // phone). The broker has likely reaped our registration, but the
+        // socket died silently — the client still believes it's open (a
+        // zombie), so peer.disconnected never goes true and no error ever
+        // fires. Force a reconnect cycle: disconnect() drops only the broker
+        // socket (existing data connections are untouched) and reconnect()
+        // re-registers the same id. On a healthy link this is a harmless blip.
+        try { peer.disconnect(); } catch { /* ignore */ }
+        try { peer.reconnect(); } catch { /* ignore */ }
+      }
+      return;
+    }
+    if (!startedRef.current) initPeer();
+  }, [initPeer]);
+  ensureAliveRef.current = ensureAlive;
+
+  // Self-healing loop. A rower's phone gets frozen by the mobile browser (screen
+  // off, app backgrounded, tab swapped), the broker reaps its registration, and
+  // nobody can touch the screen mid-row — so the link has to come back entirely
+  // on its own. Wake-style events catch the moment the platform lets the page
+  // run again; the slow interval catches dead-ends with no event (a fatal error
+  // while foregrounded, a rejected re-registration).
+  useEffect(() => {
+    const wake = () => { if (document.visibilityState !== 'hidden') ensureAliveRef.current?.(); };
+    document.addEventListener('visibilitychange', wake);
+    window.addEventListener('focus', wake);
+    window.addEventListener('online', wake);
+    window.addEventListener('pageshow', wake);
+    const id = setInterval(() => ensureAliveRef.current?.(), WATCHDOG_MS);
+    return () => {
+      document.removeEventListener('visibilitychange', wake);
+      window.removeEventListener('focus', wake);
+      window.removeEventListener('online', wake);
+      window.removeEventListener('pageshow', wake);
+      clearInterval(id);
+    };
+  }, []);
+
   const connectToRemote = useCallback((overrideCode) => {
     if (!peerRef.current) return;
     // Codes are always lowercase (numeric, or base36 from mintId); lowercase the
@@ -313,7 +471,19 @@ export function usePeerLink({ page, onData, onOpen, onClose, onJoin, fixedId, ge
     setPeerStatus('connecting');
     const conn = peerRef.current.connect(targetId, { reliable: true });
     setupConnHandlers(conn);
-  }, [remoteShortCode, setupConnHandlers]);
+    // Guard against a dial that never resolves (frozen ghost peer, dropped
+    // signalling mid-handshake): if it hasn't opened in time, tear it down and
+    // redial. Closing a not-yet-open conn doesn't emit 'close' (PeerJS bails
+    // early), so we drive the reconnect path ourselves.
+    if (dialTimeoutRef.current) { clearTimeout(dialTimeoutRef.current); dialTimeoutRef.current = null; }
+    dialTimeoutRef.current = setTimeout(() => {
+      dialTimeoutRef.current = null;
+      if (connRef.current !== conn || conn.open) return;
+      try { conn.close(); } catch { /* ignore */ }
+      connRef.current = null;
+      if (!intentionalRef.current && lastTargetRef.current) scheduleReconnect();
+    }, DIAL_TIMEOUT_MS);
+  }, [remoteShortCode, setupConnHandlers, scheduleReconnect]);
 
   // Keep a stable reference for the reconnect timer to call without a dep cycle.
   connectFnRef.current = connectToRemote;
@@ -321,11 +491,11 @@ export function usePeerLink({ page, onData, onOpen, onClose, onJoin, fixedId, ge
   // Generate a QR for the join URL once we have our own peer id.
   useEffect(() => {
     if (!myPeerId) { setQrDataUrl(''); return; }
-    const url = buildJoinUrl(page, shortFromPeerId(myPeerId));
+    const url = buildJoinUrl(page, shortFromPeerId(myPeerId), inviteRole);
     QRCode.toDataURL(url, { width: 240, margin: 1 })
       .then(setQrDataUrl)
       .catch(() => setQrDataUrl(''));
-  }, [myPeerId, page]);
+  }, [myPeerId, page, inviteRole]);
 
   // Opened via a join URL (e.g. scanned the other phone's QR): prefill the
   // remote code, notify the page, init the peer, and auto-connect once online.
@@ -346,12 +516,22 @@ export function usePeerLink({ page, onData, onOpen, onClose, onJoin, fixedId, ge
   }, [peerStatus, connectToRemote]);
 
   // Tear down peerjs on unmount — mark intentional so no reconnect is scheduled.
-  useEffect(() => () => {
-    intentionalRef.current = true;
-    if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null; }
-    if (brokerRetryTimerRef.current) { clearTimeout(brokerRetryTimerRef.current); brokerRetryTimerRef.current = null; }
-    connRef.current?.close?.();
-    peerRef.current?.destroy?.();
+  // The mount half clears the flag again: React StrictMode runs mount →
+  // cleanup → mount on the same instance, and the ref survives it — without
+  // the reset, every auto-reconnect path stays permanently disabled in dev
+  // (a rower's phone would never recover from a dropped link without a
+  // manual page refresh).
+  useEffect(() => {
+    intentionalRef.current = false;
+    return () => {
+      intentionalRef.current = true;
+      if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null; }
+      if (brokerRetryTimerRef.current) { clearTimeout(brokerRetryTimerRef.current); brokerRetryTimerRef.current = null; }
+      if (heartbeatTimerRef.current) { clearInterval(heartbeatTimerRef.current); heartbeatTimerRef.current = null; }
+      if (dialTimeoutRef.current) { clearTimeout(dialTimeoutRef.current); dialTimeoutRef.current = null; }
+      connRef.current?.close?.();
+      peerRef.current?.destroy?.();
+    };
   }, []);
 
   const sendData = useCallback((msg) => {
@@ -411,6 +591,7 @@ export function usePeerLink({ page, onData, onOpen, onClose, onJoin, fixedId, ge
   // the conn's 'close' handler then settles us back to 'online' and fires onClose.
   const disconnect = useCallback(() => {
     if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null; }
+    if (dialTimeoutRef.current) { clearTimeout(dialTimeoutRef.current); dialTimeoutRef.current = null; }
     lastTargetRef.current = null;
     reconnectAttemptsRef.current = 0;
     const conn = connRef.current;
@@ -432,6 +613,8 @@ export function usePeerLink({ page, onData, onOpen, onClose, onJoin, fixedId, ge
   return {
     myPeerId,
     shortCode: myPeerId ? shortFromPeerId(myPeerId) : '',
+    // The same join URL the QR encodes — for share-sheet / copy-link pairing.
+    joinUrl: myPeerId ? buildJoinUrl(page, shortFromPeerId(myPeerId), inviteRole) : '',
     hasPeer: !!myPeerId,
     peerStatus,
     peerError,

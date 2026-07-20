@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { deriveStrokes } from '../utils/strokePipeline';
 import {
   unpackBundle, drawOverlay, videoTimeToRowerTime, findStrokeAt, exportBurnIn,
+  deriveRoll, rollAt,
 } from '../utils/videoBundle';
 import { drawAnnotations, makeStroke, PEN_COLORS, DEFAULT_WIDTH } from '../utils/annotations';
 import { useAnalysisRecorder } from '../hooks/useAnalysisRecorder';
@@ -10,6 +11,63 @@ import AppShell from './AppShell';
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const RATES = [0.25, 0.5, 1, 2, 4];
+
+// Roll (heel / set) indicator: a line standing in for the boat/rigger that tilts
+// with lateral lean, its end bulbs the blade tips (green = starboard, red =
+// port). From the rower's seat starboard is to their left and port to their
+// right, so green sits on the LEFT.
+//
+// Drawn to physical scale against a water-surface line below: with the blade
+// ~2.4 m outboard, the tip height = OAR_REACH · sin(roll). At level the blades
+// float BLADE_CLEARANCE_CM above the water, so the low blade circle just kisses
+// the water line once its tip has dropped that far — i.e. at a real ~1.2° heel.
+const OAR_REACH_M = 2.4;        // blade tip distance from the boat centreline
+const BLADE_CLEARANCE_CM = 5;   // blade height above the water when level
+const ROLL_DISPLAY_CM = 9;      // vertical half-range drawn before the blade pegs
+function drawRollIndicator(ctx, w, h, roll) {
+  const cx = w / 2;
+  const len = Math.min(w * 0.58, 96);
+  const r = clamp(Math.min(w, h) * 0.13, 6, 11);
+  const has = roll != null && isFinite(roll);
+
+  // Vertical scale: fit ±ROLL_DISPLAY_CM of blade travel with the boat pivot
+  // centred, then place the water surface BLADE_CLEARANCE_CM below level (offset
+  // by the bulb radius so the circle's edge — not its centre — meets the line).
+  const pivotY = h * 0.46;
+  const pxPerCm = Math.min(pivotY - (r + 3), h - pivotY - (r + 3)) / ROLL_DISPLAY_CM;
+  const waterY = pivotY + BLADE_CLEARANCE_CM * pxPerCm + r;
+
+  // Water surface: a translucent band under a bright line.
+  ctx.fillStyle = 'rgba(90,150,230,0.20)';
+  ctx.fillRect(0, waterY, w, h - waterY);
+  ctx.strokeStyle = 'rgba(125,185,255,0.8)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(0, waterY); ctx.lineTo(w, waterY); ctx.stroke();
+
+  // Blade drop from level (cm) from the *true* roll. +roll = heel to starboard
+  // (rower's left) → the green (left) blade drops toward the water.
+  const dropCm = has ? OAR_REACH_M * Math.sin(roll * Math.PI / 180) * 100 : 0;
+  const dy = clamp(dropCm, -ROLL_DISPLAY_CM, ROLL_DISPLAY_CM) * pxPerCm;
+  const dx = len / 2;
+  const left = { x: cx - dx, y: pivotY + dy };   // starboard · green
+  const right = { x: cx + dx, y: pivotY - dy };  // port · red
+
+  // Rigger line + pivot.
+  ctx.strokeStyle = has ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 3.5;
+  ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(left.x, left.y); ctx.lineTo(right.x, right.y); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.beginPath(); ctx.arc(cx, pivotY, 1.6, 0, Math.PI * 2); ctx.fill();
+
+  const bulb = (p, color) => {
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = color; ctx.fill();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.stroke();
+  };
+  bulb(left, has ? '#22c55e' : 'rgba(34,197,94,0.5)');   // starboard
+  bulb(right, has ? '#ef4444' : 'rgba(239,68,68,0.5)');  // port
+}
 // Corner panel for the speed curve when it's burned into a recording.
 const CURVE_RECT = (w, h) => ({ x: w * 0.02, y: h * 0.02, w: w * 0.46, h: h * 0.3 });
 
@@ -18,6 +76,25 @@ const CurveIcon = () => (
   <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor"
     strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d="M2 16 C 6 16 7 5 11 5 C 15 5 15 16 18 16" />
+  </svg>
+);
+
+// Tilted rigger line with green/red blade dots over a water line — the roll
+// indicator in miniature, for the chip that restores it.
+const RollIcon = () => (
+  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true">
+    <line x1="4" y1="14.5" x2="20" y2="9.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    <circle cx="4" cy="14.5" r="2.4" fill="#22c55e" />
+    <circle cx="20" cy="9.5" r="2.4" fill="#ef4444" />
+    <line x1="3" y1="19" x2="21" y2="19" stroke="rgba(125,185,255,0.95)" strokeWidth="1.6" strokeLinecap="round" />
+  </svg>
+);
+
+// Minimize: a low bar (underscore), for collapsing a widget to its chip —
+// distinct from the fullscreen-exit ✕ it would otherwise sit beside.
+const MinimizeIcon = () => (
+  <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true">
+    <line x1="5" y1="14" x2="15" y2="14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
   </svg>
 );
 
@@ -52,6 +129,10 @@ function VideoAnalysis() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [hasData, setHasData] = useState(false);
+  const [recordedAt, setRecordedAt] = useState(null); // ISO start time from the bundle
+  const [hasRoll, setHasRoll] = useState(false); // boat-roll indicator has data
+  const [showRoll, setShowRoll] = useState(true); // roll widget shown vs collapsed to a chip
+  const [rollPos, setRollPos] = useState(null);   // {x,y} once dragged; null = CSS default (top-right)
 
   // Transport UI
   const [playing, setPlaying] = useState(false);
@@ -64,7 +145,6 @@ function VideoAnalysis() {
   const [readyClip, setReadyClip] = useState(null); // burned File awaiting share/download
   const [isFs, setIsFs] = useState(false);
   const [zoom, setZoom] = useState({ scale: 1, x: 0, y: 0 });
-  const [menuOpen, setMenuOpen] = useState(false);
 
   // Telestration + analysis recording. Selecting the pen or line tool enters
   // draw mode; tapping the active tool again drops back to normal transport.
@@ -77,11 +157,11 @@ function VideoAnalysis() {
   // AND governs whether the curve is burned into a recording (one control, not two).
   const [showCurve, setShowCurve] = useState(true);
   const [curvePos, setCurvePos] = useState({ x: 12, y: 56 });
+  const [curveSize, setCurveSize] = useState(null); // {w,h} once resized; null = CSS default
 
   const annotateMode = activeTool !== null;
 
   const videoRef = useRef(null);
-  const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
   const videoWrapRef = useRef(null);
   const zoomRef = useRef({ scale: 1, x: 0, y: 0 });
@@ -98,12 +178,16 @@ function VideoAnalysis() {
   const showCurveRef = useRef(showCurve);
   const fsOverlayRef = useRef(null);    // floating fullscreen curve canvas
   const curveDragRef = useRef(null);    // in-flight drag of the floating curve
+  const curveResizeRef = useRef(null);  // in-flight corner resize of the curve
   useEffect(() => { activeToolRef.current = activeTool; }, [activeTool]);
   useEffect(() => { colorRef.current = color; }, [color]);
   useEffect(() => { showCurveRef.current = showCurve; }, [showCurve]);
 
   // Stable data for the (stable) draw loop.
   const strokesRef = useRef([]);
+  const rollRef = useRef([]);           // boat-roll time series
+  const rollCanvasRef = useRef(null);   // fullscreen roll indicator canvas
+  const rollDragRef = useRef(null);     // in-flight drag of the roll widget
   const anchorRef = useRef({ startCoachPerf: 0, rowerToCoachOffset: 0, fps: 30 });
   const nudgeRef = useRef(0);
   const hasGPSRef = useRef(true);
@@ -125,6 +209,8 @@ function VideoAnalysis() {
       const { meta, videoBlob } = await unpackBundle(zipBlob);
       const strokes = deriveStrokes(meta);
       strokesRef.current = strokes;
+      rollRef.current = deriveRoll(meta);
+      setHasRoll(rollRef.current.length > 0);
       hasGPSRef.current = strokes.some((s) => s.gpsSpeed > 0);
       anchorRef.current = {
         startCoachPerf: meta.video?.startCoachPerf ?? 0,
@@ -133,6 +219,7 @@ function VideoAnalysis() {
       };
       videoBlobRef.current = videoBlob;
       zipBlobRef.current = zipBlob;
+      setRecordedAt(meta.startedAt || null);
       setStrokeCount(strokes.length);
       setVideoUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return URL.createObjectURL(videoBlob); });
       setNudgeMs(0);
@@ -178,15 +265,28 @@ function VideoAnalysis() {
     drawOverlay(ctx, { x: 0, y: 0, w, h }, { stroke, phase, hasGPS: hasGPSRef.current });
   }, []);
 
+  // Paint the fullscreen roll indicator, sizing its backing store to its box.
+  const paintRoll = useCallback((rowerTime) => {
+    const canvas = rollCanvasRef.current;
+    if (!canvas) return;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (w === 0 || h === 0) return;
+    if (canvas.width !== w) canvas.width = w;
+    if (canvas.height !== h) canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, w, h);
+    drawRollIndicator(ctx, w, h, rollAt(rollRef.current, rowerTime));
+  }, []);
+
   const draw = useCallback((t) => {
     const rowerTime = videoTimeToRowerTime(t, anchorRef.current) + nudgeRef.current;
     const stroke = findStrokeAt(strokesRef.current, rowerTime);
     const phase = stroke
       ? clamp((rowerTime - stroke.startTime) / (stroke.time - stroke.startTime), 0, 1)
       : 0;
-    paintOverlay(canvasRef.current, stroke, phase);  // side panel (normal view)
-    paintOverlay(fsOverlayRef.current, stroke, phase); // floating curve (fullscreen)
-  }, [paintOverlay]);
+    paintOverlay(fsOverlayRef.current, stroke, phase); // floating speed curve
+    paintRoll(rowerTime); // roll indicator
+  }, [paintOverlay, paintRoll]);
 
   // Frame-synced loop while playing (requestVideoFrameCallback for precise
   // mediaTime; rAF fallback). Updates the scrubber and redraws the overlay.
@@ -213,18 +313,18 @@ function VideoAnalysis() {
   // the floating fullscreen curve mounts / un-minimises).
   useEffect(() => {
     if (!playing) draw(currentTime);
-  }, [currentTime, nudgeMs, playing, draw, hasData, isFs, showCurve]);
+  }, [currentTime, nudgeMs, playing, draw, hasData, isFs, showCurve, hasRoll, showRoll]);
 
   // The floating curve is user-resizable (drag its corner). Repaint it to the new
   // size while paused; the playing frame-loop already keeps it current.
   useEffect(() => {
-    if (!isFs || !showCurve) return undefined;
+    if (!showCurve) return undefined;
     const el = fsOverlayRef.current;
     if (!el || typeof ResizeObserver === 'undefined') return undefined;
     const ro = new ResizeObserver(() => draw(videoRef.current?.currentTime ?? 0));
     ro.observe(el);
     return () => ro.disconnect();
-  }, [isFs, showCurve, draw]);
+  }, [showCurve, draw]);
 
   // --- Annotations (telestration) ---
   // Repaint the on-screen annotation canvas (committed strokes + the live one).
@@ -320,6 +420,50 @@ function VideoAnalysis() {
   };
   const onCurveDragEnd = (e) => {
     if (curveDragRef.current?.id === e.pointerId) curveDragRef.current = null;
+  };
+
+  // --- Roll widget: drag anywhere on it to reposition (the ✕ handles its own
+  // tap). Seeds from the current box so a first drag off the CSS default is
+  // smooth. ---
+  const onRollDragStart = (e) => {
+    if (e.target.closest('.va-fs-roll-close')) return;
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    const box = e.currentTarget.getBoundingClientRect();
+    rollDragRef.current = { id: e.pointerId, dx: e.clientX - box.left, dy: e.clientY - box.top };
+  };
+  const onRollDragMove = (e) => {
+    const d = rollDragRef.current;
+    if (!d || d.id !== e.pointerId) return;
+    const wrap = videoWrapRef.current.getBoundingClientRect();
+    const box = e.currentTarget.getBoundingClientRect();
+    setRollPos({
+      x: clamp(e.clientX - wrap.left - d.dx, 0, wrap.width - box.width),
+      y: clamp(e.clientY - wrap.top - d.dy, 0, wrap.height - box.height),
+    });
+  };
+  const onRollDragEnd = (e) => {
+    if (rollDragRef.current?.id === e.pointerId) rollDragRef.current = null;
+  };
+
+  // Resize via a finger-sized corner grip (the native CSS resize handle is tiny
+  // and doesn't respond to touch). Seed from the element's current box so the
+  // first drag continues from the CSS default rather than jumping.
+  const onCurveResizeStart = (e) => {
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    const box = e.currentTarget.parentElement.getBoundingClientRect();
+    curveResizeRef.current = { id: e.pointerId, x: e.clientX, y: e.clientY, w: box.width, h: box.height };
+  };
+  const onCurveResizeMove = (e) => {
+    const d = curveResizeRef.current;
+    if (!d || d.id !== e.pointerId) return;
+    const wrap = videoWrapRef.current.getBoundingClientRect();
+    setCurveSize({
+      w: clamp(d.w + (e.clientX - d.x), 140, wrap.width * 0.92),
+      h: clamp(d.h + (e.clientY - d.y), 96, wrap.height * 0.7),
+    });
+  };
+  const onCurveResizeEnd = (e) => {
+    if (curveResizeRef.current?.id === e.pointerId) curveResizeRef.current = null;
   };
 
   // --- Analysis recording (live telestration + voiceover) ---
@@ -428,7 +572,7 @@ function VideoAnalysis() {
   };
 
   const onVideoPointerDown = (e) => {
-    if (!isFs || e.target.closest?.('.va-video-controls, .va-menu, .va-fs-btn')) return;
+    if (!isFs || e.target.closest?.('.va-video-controls, .va-fs-transport, .va-menu, .va-fs-btn')) return;
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pointersRef.current.size === 2) {
       const r = videoWrapRef.current.getBoundingClientRect();
@@ -606,34 +750,20 @@ function VideoAnalysis() {
     return `${m}:${String(s).padStart(2, '0')}`;
   };
 
-  // Page-specific actions live in the top bar's right slot (a ⋮ overflow) so
-  // they stay separate from the global ☰ navigation. Only meaningful once a
-  // clip is loaded.
-  const actionsMenu = hasData ? (
-    <div className="va-actions-menu">
-      <button
-        className="app-bar-btn"
-        onClick={() => setMenuOpen((o) => !o)}
-        aria-label="Page actions"
-        aria-expanded={menuOpen}
-      >⋮</button>
-      {menuOpen && (
-        <>
-          <div className="va-menu-scrim" onClick={() => setMenuOpen(false)} />
-          <div className="va-menu-panel va-menu-panel-right" role="menu">
-            <button role="menuitem" onClick={() => { setMenuOpen(false); fileInputRef.current?.click(); }}>Load another</button>
-            <button role="menuitem" onClick={() => { setMenuOpen(false); downloadBundle(); }}>Download bundle (.zip)</button>
-            <button role="menuitem" disabled={exporting > 0} onClick={() => { setMenuOpen(false); exportClip(); }}>
-              Export shareable clip
-            </button>
-          </div>
-        </>
-      )}
-    </div>
-  ) : null;
+  // The bundle's recording date/time, compact enough for the top bar
+  // (e.g. "Jul 19 · 2:34 PM"). Falls back to the plain page name.
+  const fmtRecorded = (iso) => {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return null;
+    const date = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    return `${date} · ${time}`;
+  };
+  const recordedLabel = hasData && recordedAt ? fmtRecorded(recordedAt) : null;
+  const pageTitle = recordedLabel || 'Video Analysis';
 
   return (
-    <AppShell page="analyze" title="Video Analysis" actions={actionsMenu}>
+    <AppShell page="analyze" title={pageTitle}>
     <div className="video-analysis">
       {!hasData && (
         <div className="va-loader">
@@ -754,15 +884,6 @@ function VideoAnalysis() {
                   disabled={!annStrokes.length}
                   title="Clear" aria-label="Clear"
                 >🗑</button>
-
-                <div className="va-rail-sep" />
-
-                <button
-                  className={`va-rail-btn${showCurve ? ' active' : ''}`}
-                  onClick={() => setShowCurve((s) => !s)}
-                  title={showCurve ? 'Hide speed curve' : 'Show speed curve'}
-                  aria-label="Toggle speed curve" aria-pressed={showCurve}
-                ><CurveIcon /></button>
               </div>
 
               {/* Colour picker — a sibling of the rail so the scrolling rail's
@@ -790,11 +911,14 @@ function VideoAnalysis() {
                 </>
               )}
 
-              {/* Floating speed curve, full screen only — drag by its header.
-                  Visibility is the rail's curve toggle. The side panel still
-                  carries it in normal view. */}
-              {isFs && showCurve && (
-                <div className="va-fs-curve" style={{ left: curvePos.x, top: curvePos.y }}>
+              {/* Floating speed curve — drag by its header, resize by its
+                  corner, or minimize it to the top-left chip. Shown over the
+                  footage in both normal and full-screen view. */}
+              {showCurve && (
+                <div
+                  className="va-fs-curve"
+                  style={{ left: curvePos.x, top: curvePos.y, ...(curveSize ? { width: curveSize.w, height: curveSize.h } : null) }}
+                >
                   <div
                     className="va-fs-curve-head"
                     onPointerDown={onCurveDragStart}
@@ -802,11 +926,67 @@ function VideoAnalysis() {
                     onPointerUp={onCurveDragEnd}
                     onPointerCancel={onCurveDragEnd}
                   >
-                    <span>Speed</span>
                     <span className="va-fs-curve-grip" aria-hidden="true">⠿</span>
+                    <span>Speed</span>
+                    <button
+                      className="va-fs-curve-close"
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={() => setShowCurve(false)}
+                      title="Minimize speed graph" aria-label="Minimize speed graph"
+                    ><MinimizeIcon /></button>
                   </div>
                   <canvas ref={fsOverlayRef} className="va-fs-curve-canvas" />
+                  <div
+                    className="va-fs-curve-resize"
+                    onPointerDown={onCurveResizeStart}
+                    onPointerMove={onCurveResizeMove}
+                    onPointerUp={onCurveResizeEnd}
+                    onPointerCancel={onCurveResizeEnd}
+                    title="Drag to resize"
+                    aria-hidden="true"
+                  >⤡</div>
                 </div>
+              )}
+
+              {/* Boat-roll (heel / set) indicator. Drag it anywhere; minimize
+                  collapses it to the chip. Defaults top-right (left of the
+                  full-screen button) until dragged. */}
+              {hasRoll && showRoll && (
+                <div
+                  className="va-fs-roll"
+                  style={rollPos ? { left: rollPos.x, top: rollPos.y, right: 'auto' } : undefined}
+                  title="Boat roll (green = starboard, red = port) — drag to move"
+                  onPointerDown={onRollDragStart}
+                  onPointerMove={onRollDragMove}
+                  onPointerUp={onRollDragEnd}
+                  onPointerCancel={onRollDragEnd}
+                >
+                  <canvas ref={rollCanvasRef} className="va-fs-roll-canvas" aria-hidden="true" />
+                  <button
+                    className="va-fs-roll-close"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={() => setShowRoll(false)}
+                    title="Minimize roll indicator" aria-label="Minimize roll indicator"
+                  ><MinimizeIcon /></button>
+                </div>
+              )}
+
+              {/* Collapsed roll indicator: a chip that restores it. */}
+              {hasRoll && !showRoll && (
+                <button
+                  className="va-fs-roll-chip"
+                  onClick={() => setShowRoll(true)}
+                  title="Show roll indicator" aria-label="Show roll indicator"
+                ><RollIcon /></button>
+              )}
+
+              {/* Collapsed speed graph: a top-left chip that restores it. */}
+              {!showCurve && (
+                <button
+                  className="va-fs-curve-chip"
+                  onClick={() => setShowCurve(true)}
+                  title="Show speed graph" aria-label="Show speed graph"
+                ><CurveIcon /></button>
               )}
 
               {exporting > 0 && (
@@ -832,7 +1012,42 @@ function VideoAnalysis() {
                 </button>
                 <button onClick={() => stepFrame(1)} title="Next frame" aria-label="Next frame">|▶</button>
                 <button onClick={goToEnd} title="Go to end" aria-label="Go to end">⏭</button>
+                {/* Playback speed sits inline with the transport in full screen
+                    (the page's own speed control below the footage is hidden). */}
+                {isFs && (
+                  <select
+                    className="va-fs-rate"
+                    value={rate}
+                    onChange={(e) => onRate(Number(e.target.value))}
+                    title="Playback speed"
+                    aria-label="Playback speed"
+                  >
+                    {RATES.map((r) => <option key={r} value={r}>{r}×</option>)}
+                  </select>
+                )}
               </div>
+
+              {/* Full-screen scrubber pinned to the very bottom. The page's
+                  scrubber lives below the footage and is hidden while full
+                  screen, so this is the only scrubber for that mode. */}
+              {isFs && (
+                <div className="va-fs-transport">
+                  <div className="va-fs-scrub-row">
+                    <span className="va-fs-time">{fmt(currentTime)}</span>
+                    <input
+                      className="va-fs-scrub"
+                      type="range"
+                      min={0}
+                      max={duration || 0}
+                      step={0.01}
+                      value={currentTime}
+                      onChange={(e) => seekTo(Number(e.target.value))}
+                      aria-label="Seek"
+                    />
+                    <span className="va-fs-time">{fmt(duration)}</span>
+                  </div>
+                </div>
+              )}
 
               {/* Recording transport + mute. Pulled off the right-edge rail (too
                   short for every icon on a phone) and parked at the bottom-right,
@@ -872,7 +1087,6 @@ function VideoAnalysis() {
                 )}
               </div>
             </div>
-            <canvas ref={canvasRef} className="va-overlay" />
           </div>
 
           <div className="va-transport">
@@ -913,6 +1127,15 @@ function VideoAnalysis() {
 
               <button className="btn btn-secondary btn-sm" onClick={() => alignToStrokes(currentTime)} title="Align the curve to the playhead">
                 ⟲ Align here
+              </button>
+            </div>
+
+            {/* Bundle actions, out in the open (replacing the old ⋮ overflow). */}
+            <div className="va-actions">
+              <button className="btn btn-secondary btn-sm" onClick={() => fileInputRef.current?.click()}>Load another</button>
+              <button className="btn btn-secondary btn-sm" onClick={downloadBundle}>Download bundle (.zip)</button>
+              <button className="btn btn-primary btn-sm" disabled={exporting > 0} onClick={exportClip}>
+                {exporting > 0 ? `Exporting… ${Math.round(exporting * 100)}%` : 'Export shareable clip'}
               </button>
             </div>
 

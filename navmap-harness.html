@@ -1,0 +1,51 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NavMap harness</title>
+<style>html,body{margin:0;height:100%;background:#000}#root{position:fixed;inset:0}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module">
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import '/src/App.css';
+import NavMap from '/src/components/NavMap.jsx';
+
+// ?basemap=osm|sat picks the tile layer; ?mute=1 previews a desaturated
+// basemap (CSS-only here, not app code) to see how much the overlays pop.
+const q = new URLSearchParams(location.search);
+try { localStorage.setItem('freespeed_basemap_v1', q.get('basemap') === 'sat' ? 'sat' : 'osm'); } catch {}
+if (q.get('mute')) {
+  const s = document.createElement('style');
+  s.textContent = '.bignav .leaflet-tile-pane{filter:saturate(0.55) contrast(0.92) brightness(1.06)}';
+  document.head.appendChild(s);
+}
+
+// Simulated row: 4 m/s at heading 170°, ending at Riverbluffs Park on the
+// Grand River (the island downstream becomes the mid-channel divider).
+const END = { lat: 43.3690, lon: -80.3215 };
+const HDG = (170 * Math.PI) / 180;
+const SPEED = 4, N = 120, T0 = 1750000000000;
+const mLat = 1 / 111320;
+const mLon = 1 / (111320 * Math.cos((END.lat * Math.PI) / 180));
+const startN = -Math.cos(HDG) * (N - 1) * SPEED;
+const startE = -Math.sin(HDG) * (N - 1) * SPEED;
+const track = [];
+for (let i = 0; i < N; i++) {
+  const d = i * SPEED;
+  const sway = Math.sin(i / 10) * 2.5; // gentle S so the trail reads as a row
+  const north = startN + Math.cos(HDG) * d - Math.sin(HDG) * sway;
+  const east = startE + Math.sin(HDG) * d + Math.cos(HDG) * sway;
+  track.push({ t: T0 + i * 1000, lat: END.lat + north * mLat, lon: END.lon + east * mLon });
+}
+
+// Sun-theme palette values from LiveBigScreen.
+createRoot(document.getElementById('root')).render(
+  React.createElement(NavMap, { track, accent: '#0040c0', trackColor: 'rgba(0,0,0,0.4)' })
+);
+</script>
+</body>
+</html>

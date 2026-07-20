@@ -8,7 +8,7 @@ import { useTheme } from '../hooks/useTheme';
 
 const DESTINATIONS = [
   { id: 'live', label: 'Live Stroke Capture', hash: '' },
-  { id: 'course', label: 'Course Marks', hash: '#course' },
+  { id: 'sessions', label: 'Sessions', hash: '#sessions' },
   { id: 'analyze', label: 'Video Analysis', hash: '#analyze' },
   { id: 'calculator', label: 'Efficiency Calculator', hash: '#calculator' },
   { id: 'tradeoffs', label: 'Tradeoffs', hash: '#tradeoffs' },
@@ -75,10 +75,29 @@ function AppShell({ page, title, actions, immersive = false, children }) {
 
         <div className="app-drawer-divider" />
 
-        <button className="app-drawer-row" onClick={toggle} role="switch" aria-checked={isDark}>
-          <span>{isDark ? '☾' : '☀'} {isDark ? 'Dark mode' : 'Light mode'}</span>
-          <span className="app-drawer-toggle" data-on={isDark}><span /></span>
-        </button>
+        <div className="app-drawer-section">Settings</div>
+        <ul className="app-drawer-nav">
+          <li>
+            <button
+              className={`app-drawer-link${page === 'link' ? ' active' : ''}`}
+              onClick={() => go('#link')}
+              aria-current={page === 'link' ? 'page' : undefined}
+            >Rower / Coach Link Setup</button>
+          </li>
+          <li>
+            <button
+              className={`app-drawer-link${page === 'course' ? ' active' : ''}`}
+              onClick={() => go('#course')}
+              aria-current={page === 'course' ? 'page' : undefined}
+            >Edit Course Markings</button>
+          </li>
+          <li>
+            <button className="app-drawer-row" onClick={toggle} role="switch" aria-checked={isDark}>
+              <span>{isDark ? '☾' : '☀'} {isDark ? 'Dark mode' : 'Light mode'}</span>
+              <span className="app-drawer-toggle" data-on={isDark}><span /></span>
+            </button>
+          </li>
+        </ul>
 
         <div className="app-drawer-divider" />
 

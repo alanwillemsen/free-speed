@@ -47,16 +47,29 @@ export function useVideoRecorder() {
     if (streamRef.current) return streamRef.current;
     try {
       const s = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' },
+        // Ask for 1080p60 — sharper frames and smoother stroke motion for
+        // frame-stepping in review. All `ideal`, so weaker cameras fall back
+        // gracefully to whatever mode they support.
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 60 },
+        },
         audio: false,
       });
       streamRef.current = s;
       setStream(s);
       setError('');
-      const zc = s.getVideoTracks()[0]?.getCapabilities?.().zoom;
+      const track = s.getVideoTracks()[0];
+      const zc = track?.getCapabilities?.().zoom;
       if (zc && zc.max > zc.min) {
         setZoomCaps({ min: zc.min, max: zc.max, step: zc.step || 0.1 });
-        setZoomState(s.getVideoTracks()[0].getSettings?.().zoom ?? zc.min);
+        // Default the viewfinder to 2× so the rower fills more of the frame from
+        // the launch; clamp to the track's range for cameras that top out below 2×.
+        const target = Math.min(zc.max, Math.max(zc.min, 2));
+        try { await track.applyConstraints({ advanced: [{ zoom: target }] }); } catch { /* ignore */ }
+        setZoomState(track.getSettings?.().zoom ?? target);
       } else {
         setZoomCaps(null);
         setZoomState(null);
@@ -102,12 +115,23 @@ export function useVideoRecorder() {
     chunksRef.current = [];
 
     const track = s.getVideoTracks()[0];
-    const fps = track?.getSettings?.().frameRate || 30;
+    const settings = track?.getSettings?.() || {};
+    const fps = settings.frameRate || 30;
     const startCoachPerf = performance.now();
 
     await videoStore.begin({ mime, fps, startedAt: new Date().toISOString() }).catch(() => {});
 
-    const rec = new MediaRecorder(s, mime ? { mimeType: mime } : undefined);
+    // Scale the bitrate to the resolution/fps we actually got — MediaRecorder's
+    // default (~2.5 Mbps) is far too low for 1080p and is the main cause of soft,
+    // blocky footage. ~0.1 bit/pixel/frame ≈ 12 Mbps at 1080p60 and drops cleanly
+    // on cameras that fell back to a smaller mode.
+    const w = settings.width || 1920;
+    const h = settings.height || 1080;
+    const videoBitsPerSecond = Math.round(w * h * fps * 0.1);
+    const rec = new MediaRecorder(s, {
+      ...(mime ? { mimeType: mime } : {}),
+      videoBitsPerSecond,
+    });
     rec.ondataavailable = (e) => {
       if (e.data && e.data.size) {
         chunksRef.current.push(e.data);
