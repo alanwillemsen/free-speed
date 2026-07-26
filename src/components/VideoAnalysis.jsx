@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { deriveStrokes } from '../utils/strokePipeline';
 import {
-  unpackBundle, drawOverlay, videoTimeToRowerTime, findStrokeAt, exportBurnIn,
+  unpackBundle, packBundle, drawOverlay, videoTimeToRowerTime, findStrokeAt, exportBurnIn,
   deriveRoll, rollAt,
 } from '../utils/videoBundle';
 import { drawAnnotations, makeStroke, PEN_COLORS, DEFAULT_WIDTH } from '../utils/annotations';
@@ -11,6 +11,16 @@ import AppShell from './AppShell';
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const RATES = [0.25, 0.5, 1, 2, 4];
+
+// Common camera frame rates. A noisy rVFC estimate that sits within 5% of one
+// of these snaps to it exactly, so frame steps land dead on frame boundaries.
+const NICE_FPS = [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 90, 120];
+const snapFps = (f) => {
+  if (!f || !isFinite(f)) return null;
+  let best = NICE_FPS[0];
+  for (const c of NICE_FPS) if (Math.abs(c - f) < Math.abs(best - f)) best = c;
+  return Math.abs(best - f) / best < 0.05 ? best : f;
+};
 
 // Roll (heel / set) indicator: a line standing in for the boat/rigger that tilts
 // with lateral lean, its end bulbs the blade tips (green = starboard, red =
@@ -131,7 +141,7 @@ function VideoAnalysis() {
   const [hasData, setHasData] = useState(false);
   const [recordedAt, setRecordedAt] = useState(null); // ISO start time from the bundle
   const [hasRoll, setHasRoll] = useState(false); // boat-roll indicator has data
-  const [showRoll, setShowRoll] = useState(true); // roll widget shown vs collapsed to a chip
+  const [showRoll, setShowRoll] = useState(false); // roll widget shown vs collapsed to a chip (starts collapsed)
   const [rollPos, setRollPos] = useState(null);   // {x,y} once dragged; null = CSS default (top-right)
 
   // Transport UI
@@ -155,18 +165,36 @@ function VideoAnalysis() {
 
   // Speed-curve overlay: the rail toggle shows the floating curve in fullscreen
   // AND governs whether the curve is burned into a recording (one control, not two).
-  const [showCurve, setShowCurve] = useState(true);
+  const [showCurve, setShowCurve] = useState(false); // starts collapsed to its chip
   const [curvePos, setCurvePos] = useState({ x: 12, y: 56 });
   const [curveSize, setCurveSize] = useState(null); // {w,h} once resized; null = CSS default
+
+  const videoMetaRef = useRef(null);  // the bundle's meta.video, kept for re-packs
 
   const annotateMode = activeTool !== null;
 
   const videoRef = useRef(null);
   const fileInputRef = useRef(null);
+  const strokeInputRef = useRef(null);
   const videoWrapRef = useRef(null);
   const zoomRef = useRef({ scale: 1, x: 0, y: 0 });
   const pointersRef = useRef(new Map());
   const pinchRef = useRef(null);
+
+  // Seek serialization: setting video.currentTime starts an async seek, and on
+  // mobile the H.264/HEVC decoder stalls if a new seek lands before the last
+  // one's 'seeked' fires (especially stepping backward, which decodes forward
+  // from the previous keyframe). We run one seek at a time and collapse any taps
+  // that arrive mid-seek down to the latest target.
+  const seekingRef = useRef(false);      // a seek is in flight
+  const desiredTimeRef = useRef(null);    // latest requested time not yet applied
+  const targetTimeRef = useRef(0);        // where the playhead is heading (or is)
+
+  // Measured frame rate: the declared fps is often just 30 (see loadFromVideoFile),
+  // so 1/fps steps can land between real frames on 60fps / VFR phone footage and
+  // appear to do nothing. We time the true cadence off requestVideoFrameCallback.
+  const detectedFpsRef = useRef(null);    // smoothed fps from rVFC cadence
+  const lastFrameMetaRef = useRef(null);  // {time, frames} of the previous frame
 
   // Annotation surface + live-draw refs (drawn imperatively for smoothness).
   const annCanvasRef = useRef(null);
@@ -224,6 +252,7 @@ function VideoAnalysis() {
       setVideoUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return URL.createObjectURL(videoBlob); });
       setNudgeMs(0);
       nudgeRef.current = 0;
+      videoMetaRef.current = meta.video || null;
       setHasData(true);
       if (persist) videoStore.putCurrent(zipBlob).catch(() => {});
     } catch (e) {
@@ -233,6 +262,42 @@ function VideoAnalysis() {
       setLoading(false);
     }
   }, []);
+
+  // A plain video file — e.g. filmed with the phone's NATIVE camera app,
+  // whose optical/electronic stabilization no web page can match — wrapped
+  // into a bundle with no stroke data. "Add stroke data (.json)" then merges
+  // the rower's session and the sync tools line it up. The file's
+  // lastModified stamp (≈ end of recording) minus nothing is kept only as a
+  // label; sync always comes from the merge + align flow.
+  const loadFromVideoFile = useCallback(async (file) => {
+    const startedAt = new Date(file.lastModified || Date.now()).toISOString();
+    const meta = {
+      version: 1,
+      startedAt,
+      motion: [],
+      orientation: [],
+      gps: [],
+      video: {
+        startedAt,
+        startCoachPerf: 0,
+        rowerToCoachOffset: 0,
+        mime: file.type || 'video/mp4',
+        fps: 30,
+      },
+    };
+    const zip = await packBundle(meta, file);
+    await loadFromZip(zip);
+  }, [loadFromZip]);
+
+  // Shared picker for both file inputs: bundles load directly, bare videos
+  // get wrapped first.
+  const onPickFile = (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f) return;
+    if ((f.type || '').startsWith('video/') || /\.(mp4|m4v|mov|webm)$/i.test(f.name)) loadFromVideoFile(f);
+    else loadFromZip(f);
+  };
 
   // On mount, pick up a hand-off from Live Capture; failing that, restore the
   // bundle that was open before a reload.
@@ -298,12 +363,29 @@ function VideoAnalysis() {
     let handle;
     const step = (_now, meta) => {
       const t = meta ? meta.mediaTime : video.currentTime;
+      // Estimate the true frame rate from the media-time advance per presented
+      // frame (invariant of playbackRate; presentedFrames divides out any drops).
+      // Clamp to a sane band so a post-seek jump doesn't poison the average.
+      if (meta) {
+        const prev = lastFrameMetaRef.current;
+        if (prev && meta.presentedFrames > prev.frames && meta.mediaTime > prev.time) {
+          const dur = (meta.mediaTime - prev.time) / (meta.presentedFrames - prev.frames);
+          if (dur > 0.004 && dur < 0.2) {
+            const f = 1 / dur;
+            detectedFpsRef.current = detectedFpsRef.current
+              ? detectedFpsRef.current * 0.8 + f * 0.2
+              : f;
+          }
+        }
+        lastFrameMetaRef.current = { time: meta.mediaTime, frames: meta.presentedFrames };
+      }
       draw(t);
       setCurrentTime(t);
       handle = useRVFC ? video.requestVideoFrameCallback(step) : requestAnimationFrame(() => step());
     };
     handle = useRVFC ? video.requestVideoFrameCallback(step) : requestAnimationFrame(() => step());
     return () => {
+      lastFrameMetaRef.current = null; // don't span the play/pause gap
       if (useRVFC) video.cancelVideoFrameCallback?.(handle);
       else cancelAnimationFrame(handle);
     };
@@ -398,6 +480,8 @@ function VideoAnalysis() {
   // Tapping a tool selects it (entering draw mode); tapping the active tool again
   // exits draw mode back to normal transport.
   const toggleTool = (t) => setActiveTool((cur) => (cur === t ? null : t));
+
+  const footageTransform = `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`;
 
   // --- Floating fullscreen curve: drag (via its header) ---
   const onCurveDragStart = (e) => {
@@ -513,19 +597,46 @@ function VideoAnalysis() {
     if (videoRef.current) videoRef.current.playbackRate = r;
   };
 
+  // Apply the newest requested seek, one at a time. A seek queued while another
+  // is in flight waits here and, when the first completes, jumps straight to the
+  // latest target — so a burst of frame-step taps never stacks overlapping seeks.
+  const pumpSeek = () => {
+    const v = videoRef.current;
+    if (!v || seekingRef.current) return;
+    const target = desiredTimeRef.current;
+    if (target == null) return;
+    desiredTimeRef.current = null;
+    if (Math.abs(target - v.currentTime) < 1e-3) { setCurrentTime(v.currentTime); return; }
+    seekingRef.current = true;
+    const onSeeked = () => {
+      v.removeEventListener('seeked', onSeeked);
+      seekingRef.current = false;
+      setCurrentTime(v.currentTime);
+      pumpSeek(); // drain anything requested during this seek
+    };
+    v.addEventListener('seeked', onSeeked);
+    v.currentTime = target;
+  };
+
   const seekTo = (t) => {
     const v = videoRef.current;
     if (!v) return;
     const clamped = clamp(t, 0, duration || v.duration || 0);
-    v.currentTime = clamped;
-    setCurrentTime(clamped);
+    targetTimeRef.current = clamped;
+    desiredTimeRef.current = clamped;
+    setCurrentTime(clamped); // optimistic: scrubber + time-based overlay update now
+    pumpSeek();
   };
 
   const stepFrame = (dir) => {
     const v = videoRef.current;
     if (!v) return;
     if (!v.paused) { v.pause(); setPlaying(false); }
-    seekTo((v.currentTime) + dir * (1 / fps));
+    // Step from where we're heading (not the still-lagging displayed frame) so
+    // rapid taps accumulate, and by the measured frame duration when we have it.
+    const base = seekingRef.current ? targetTimeRef.current : v.currentTime;
+    const stepFps = snapFps(detectedFpsRef.current) || fps;
+    seekTo(base + dir / stepFps);
   };
 
   const goToStart = () => seekTo(0);
@@ -650,6 +761,49 @@ function VideoAnalysis() {
     setNudge(s[0].startTime - videoTimeToRowerTime(0, anchorRef.current));
   };
 
+  // Merge a rower's separately-recorded session into a video-only clip. The two
+  // phones share no clock (the rower wasn't linked while filming), so we derive
+  // the strokes, pin the curve to the video start, and let the coach fine-tune
+  // with the sync controls. The merged strokes are re-packed into the bundle so
+  // they survive a reload and feed export / burn-in like a linked recording.
+  const [merging, setMerging] = useState(false);
+  const mergeStrokeData = useCallback(async (file) => {
+    setMerging(true);
+    setError('');
+    try {
+      const rec = JSON.parse(await file.text());
+      if (!rec.motion || !Array.isArray(rec.motion)) {
+        throw new Error('not a Free Speed stroke recording');
+      }
+      const strokes = deriveStrokes(rec);
+      if (!strokes.length) {
+        setError('No strokes were detected in that file — check it holds a full row.');
+        return;
+      }
+      strokesRef.current = strokes;
+      rollRef.current = deriveRoll(rec);
+      setHasRoll(rollRef.current.length > 0);
+      hasGPSRef.current = strokes.some((s) => s.gpsSpeed > 0);
+      setStrokeCount(strokes.length);
+      // No shared clock: pin video t=0 to the first stroke's catch as a starting
+      // point (the coach refines with "Align here" + the ± nudge).
+      setNudge(strokes[0].startTime - videoTimeToRowerTime(0, anchorRef.current));
+      setShowCurve(true); // surface the curve straight away so the merge is visible
+      // Re-pack so the merge is durable and export/burn-in see the strokes.
+      if (videoBlobRef.current) {
+        const meta = { ...rec, video: videoMetaRef.current || {} };
+        const zip = await packBundle(meta, videoBlobRef.current);
+        zipBlobRef.current = zip;
+        videoStore.putCurrent(zip).catch(() => {});
+      }
+      draw(videoRef.current?.currentTime ?? 0);
+    } catch (e) {
+      setError('Could not add stroke data: ' + (e?.message ?? e));
+    } finally {
+      setMerging(false);
+    }
+  }, [draw]);
+
   // Refinement (the "Align here" button): the user scrubs to a clear catch in
   // the footage and taps — snap the current playhead to the nearest stroke catch.
   // After the coarse align the error is under one stroke, so "nearest" is exact.
@@ -762,6 +916,10 @@ function VideoAnalysis() {
   const recordedLabel = hasData && recordedAt ? fmtRecorded(recordedAt) : null;
   const pageTitle = recordedLabel || 'Video Analysis';
 
+  // The speed graph is only meaningful with detected strokes — hide its widget
+  // and restore chip entirely when the recording has none.
+  const hasStrokes = strokeCount > 0;
+
   return (
     <AppShell page="analyze" title={pageTitle}>
     <div className="video-analysis">
@@ -769,17 +927,20 @@ function VideoAnalysis() {
         <div className="va-loader">
           <p>
             Load a Free Speed video bundle (.zip) recorded in coach mode — the
-            stroke curve plays in sync with the footage.
+            stroke curve plays in sync with the footage. Or load a plain video
+            filmed with your phone&rsquo;s camera app (its built-in stabilization
+            beats anything a web page can do), then add the rower&rsquo;s stroke
+            data to it.
           </p>
           <input
             ref={fileInputRef}
             type="file"
-            accept=".zip,application/zip"
+            accept=".zip,application/zip,video/*"
             style={{ display: 'none' }}
-            onChange={(e) => { const f = e.target.files?.[0]; if (f) loadFromZip(f); e.target.value = ''; }}
+            onChange={onPickFile}
           />
           <button className="btn btn-primary btn-large" onClick={() => fileInputRef.current?.click()} disabled={loading}>
-            {loading ? 'Loading…' : 'Load bundle (.zip)'}
+            {loading ? 'Loading…' : 'Load bundle (.zip) or video'}
           </button>
           {error && <p className="oar-status va-error">{error}</p>}
         </div>
@@ -805,7 +966,7 @@ function VideoAnalysis() {
                 muted
                 disablePictureInPicture
                 controlsList="nodownload nofullscreen noremoteplayback noplaybackrate"
-                style={{ transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`, transformOrigin: '0 0' }}
+                style={{ transform: footageTransform, transformOrigin: '0 0' }}
                 onLoadedMetadata={(e) => {
                   const dur = e.target.duration || 0;
                   setDuration(dur);
@@ -827,7 +988,7 @@ function VideoAnalysis() {
               <canvas
                 ref={annCanvasRef}
                 className={`va-annotate${annotateMode ? ' active' : ''}`}
-                style={{ transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`, transformOrigin: '0 0' }}
+                style={{ transform: footageTransform, transformOrigin: '0 0' }}
                 onPointerDown={onAnnPointerDown}
                 onPointerMove={onAnnPointerMove}
                 onPointerUp={onAnnPointerUp}
@@ -914,7 +1075,7 @@ function VideoAnalysis() {
               {/* Floating speed curve — drag by its header, resize by its
                   corner, or minimize it to the top-left chip. Shown over the
                   footage in both normal and full-screen view. */}
-              {showCurve && (
+              {hasStrokes && showCurve && (
                 <div
                   className="va-fs-curve"
                   style={{ left: curvePos.x, top: curvePos.y, ...(curveSize ? { width: curveSize.w, height: curveSize.h } : null) }}
@@ -981,7 +1142,7 @@ function VideoAnalysis() {
               )}
 
               {/* Collapsed speed graph: a top-left chip that restores it. */}
-              {!showCurve && (
+              {hasStrokes && !showCurve && (
                 <button
                   className="va-fs-curve-chip"
                   onClick={() => setShowCurve(true)}
@@ -1133,6 +1294,14 @@ function VideoAnalysis() {
             {/* Bundle actions, out in the open (replacing the old ⋮ overflow). */}
             <div className="va-actions">
               <button className="btn btn-secondary btn-sm" onClick={() => fileInputRef.current?.click()}>Load another</button>
+              <button
+                className={`btn btn-sm ${hasStrokes ? 'btn-secondary' : 'btn-primary'}`}
+                onClick={() => strokeInputRef.current?.click()}
+                disabled={merging}
+                title="Merge a rower's separately-recorded stroke data (.json) into this clip"
+              >
+                {merging ? 'Adding…' : hasStrokes ? 'Replace stroke data' : 'Add stroke data (.json)'}
+              </button>
               <button className="btn btn-secondary btn-sm" onClick={downloadBundle}>Download bundle (.zip)</button>
               <button className="btn btn-primary btn-sm" disabled={exporting > 0} onClick={exportClip}>
                 {exporting > 0 ? `Exporting… ${Math.round(exporting * 100)}%` : 'Export shareable clip'}
@@ -1145,16 +1314,23 @@ function VideoAnalysis() {
 
             <div className="va-diag">
               {strokeCount === 0
-                ? '⚠ No strokes were detected in this recording — the data may be missing or all out of the rowing-speed band.'
+                ? '⚠ No stroke data in this clip — tap “Add stroke data” to merge the rower’s recorded session, or it may be missing / all out of the rowing-speed band.'
                 : `${strokeCount} strokes${isAligned() ? '' : ' · curve not lined up — tap “Align here” over a drive, then fine-tune'}`}
             </div>
 
             <input
               ref={fileInputRef}
               type="file"
-              accept=".zip,application/zip"
+              accept=".zip,application/zip,video/*"
               style={{ display: 'none' }}
-              onChange={(e) => { const f = e.target.files?.[0]; if (f) loadFromZip(f); e.target.value = ''; }}
+              onChange={onPickFile}
+            />
+            <input
+              ref={strokeInputRef}
+              type="file"
+              accept="application/json,.json"
+              style={{ display: 'none' }}
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) mergeStrokeData(f); e.target.value = ''; }}
             />
             {error && <p className="oar-status va-error">{error}</p>}
           </div>

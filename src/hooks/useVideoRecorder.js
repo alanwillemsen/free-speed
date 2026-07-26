@@ -41,6 +41,8 @@ export function useVideoRecorder() {
   const recorderRef = useRef(null);
   const chunksRef = useRef([]);
   const mimeRef = useRef('');
+  const gyroRef = useRef([]);        // coach-phone rotation rates during the clip
+  const gyroStopRef = useRef(null);  // detaches the devicemotion listener
 
   const enable = useCallback(async () => {
     if (!supported) { setError('Camera/recording not supported on this device.'); return null; }
@@ -119,6 +121,36 @@ export function useVideoRecorder() {
     const fps = settings.frameRate || 30;
     const startCoachPerf = performance.now();
 
+    // Record the phone's own gyroscope for the duration of the clip, as
+    // diagnostic data in the bundle (gyro-based playback stabilization was
+    // tried and abandoned — the phone's OIS absorbs a variable fraction of
+    // the rotation, so no fixed gyro→pixel mapping holds; see the analyzer
+    // history). Timestamps share the performance.now() clock with
+    // startCoachPerf. iOS gates devicemotion behind a permission prompt that
+    // must run inside a user gesture — start() is called from the shutter
+    // tap, so this qualifies.
+    gyroRef.current = [];
+    try {
+      if (typeof DeviceMotionEvent !== 'undefined' &&
+          typeof DeviceMotionEvent.requestPermission === 'function') {
+        await DeviceMotionEvent.requestPermission().catch(() => {});
+      }
+    } catch { /* no motion permission — record video without gyro */ }
+    const round1 = (v) => Math.round(v * 10) / 10;
+    const onMotion = (e) => {
+      const r = e.rotationRate;
+      if (!r || r.alpha == null) return; // some platforms fire empty events
+      gyroRef.current.push({
+        t: round1(performance.now()),
+        ra: round1(r.alpha), rb: round1(r.beta), rg: round1(r.gamma),
+      });
+    };
+    window.addEventListener('devicemotion', onMotion);
+    gyroStopRef.current = () => {
+      window.removeEventListener('devicemotion', onMotion);
+      gyroStopRef.current = null;
+    };
+
     await videoStore.begin({ mime, fps, startedAt: new Date().toISOString() }).catch(() => {});
 
     // Scale the bitrate to the resolution/fps we actually got — MediaRecorder's
@@ -141,11 +173,20 @@ export function useVideoRecorder() {
     rec.start(CHUNK_MS);
     recorderRef.current = rec;
     setIsRecording(true);
-    return { startCoachPerf, mime, fps };
+    return {
+      startCoachPerf,
+      mime,
+      fps,
+      // For interpreting the gyro later: which way the phone was held, and how
+      // far it was zoomed (zoom scales rotation → pixel displacement).
+      orientationAngle: (typeof screen !== 'undefined' && screen.orientation?.angle) || 0,
+      cameraZoom: settings.zoom ?? null,
+    };
   }, [supported, enable]);
 
   // Stop recording and resolve with the assembled Blob (null if nothing recorded).
   const stop = useCallback(() => {
+    gyroStopRef.current?.();
     const rec = recorderRef.current;
     if (!rec) return Promise.resolve(null);
     return new Promise((resolve) => {
@@ -163,12 +204,16 @@ export function useVideoRecorder() {
     });
   }, []);
 
+  // The clip's gyro samples, for the caller to pack into the bundle meta.
+  const takeGyro = useCallback(() => gyroRef.current, []);
+
   // Tear down camera + recorder on unmount.
   useEffect(() => () => {
+    gyroStopRef.current?.();
     try { recorderRef.current?.stop(); } catch { /* ignore */ }
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
   }, []);
 
-  return { supported, stream, isRecording, error, enable, disable, start, stop, zoom, zoomCaps, setZoom };
+  return { supported, stream, isRecording, error, enable, disable, start, stop, takeGyro, zoom, zoomCaps, setZoom };
 }

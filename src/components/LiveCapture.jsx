@@ -856,23 +856,27 @@ function LiveCapture({ variant, active = true }) {
     videoRecordingActiveRef.current = false;
     try {
       const blob = await videoRecorder.stop();
-      // Bundle the piece that was pinned while filming, never whichever piece is
-      // current now (which may be a later one the rower started downriver).
-      const rec = videoRecordingRef.current || recordingRef.current;
       if (!blob) return;
-      if (!rec || rec.motion.length === 0) {
-        // No rower stream reached us during the clip — a video with nothing to
-        // sync to defeats the purpose, so don't ship a data-less bundle.
-        alert('No stroke data arrived while filming, so there is nothing to sync the video to. Make sure the rower is connected and capturing before you record.');
-        return;
-      }
-      if (videoPieceCountRef.current > 1) {
+      const anchor = videoAnchorRef.current || {};
+      // Bundle the piece that was pinned while filming, never whichever piece is
+      // current now (which may be a later one the rower started downriver). With
+      // no rower connected there's no piece to pin — ship a data-less bundle
+      // anyway: the coach can film first and merge a rower's separately-recorded
+      // session in later (Video Analysis → "Add stroke data").
+      const rec = videoRecordingRef.current || recordingRef.current || {
+        version: 1,
+        startedAt: anchor.startedAt || new Date().toISOString(),
+        userAgent: navigator.userAgent,
+        motion: [],
+        orientation: [],
+        gps: [],
+      };
+      if (rec.motion.length > 0 && videoPieceCountRef.current > 1) {
         // The clip crossed a piece boundary; only the piece pinned last is a
         // full match. Warn rather than silently ship footage that only partly
         // lines up with its strokes.
         alert('Heads up: the rower started a new piece while you were filming, so only the latest piece is synced to this clip. Film one piece per video for a full frame-by-frame match.');
       }
-      const anchor = videoAnchorRef.current || {};
       // Lock in the best clock offset we have at stop time.
       anchor.rowerToCoachOffset = rowerToCoachRef.current ?? anchor.rowerToCoachOffset ?? 0;
       const meta = {
@@ -883,6 +887,11 @@ function LiveCapture({ variant, active = true }) {
           rowerToCoachOffset: anchor.rowerToCoachOffset,
           mime: anchor.mime || blob.type,
           fps: anchor.fps || 30,
+          // Coach-phone gyro over the clip (EIS-style stabilization data),
+          // plus how the phone was held and zoomed for interpreting it.
+          orientationAngle: anchor.orientationAngle ?? 0,
+          cameraZoom: anchor.cameraZoom ?? null,
+          gyro: videoRecorder.takeGyro?.() || [],
         },
       };
       const bundle = { blob, meta };
@@ -2649,7 +2658,7 @@ function LiveCapture({ variant, active = true }) {
   const videoView = linkRole === 'coach' && videoRecorder.supported && (
     <div className="live-video">
       {!videoArmed && !videoRecorder.isRecording && !videoBundle && (
-        <button className="btn btn-secondary btn-sm" onClick={armVideo}>
+        <button className="btn btn-primary btn-large live-video-record" onClick={armVideo}>
           🎥 Record video
         </button>
       )}
@@ -2834,6 +2843,21 @@ function LiveCapture({ variant, active = true }) {
           the pairing panel only shows while on the drawer's Rower / Coach Link
           Setup destination (#link) — capture auto-starts on a rower's phone,
           so that destination must work mid-session too. */}
+      {/* Coach can film without connecting to anyone — keep the record button
+          at the top, above the pairing panel, so it's the first thing they see.
+          The rower's stroke data can be merged into the clip later. */}
+      {!isAnalysis && mode === 'setup' && linkRole === 'coach' && (
+        <div className="live-video-lead">
+          {videoView}
+          {!videoBundle && (
+            <p className="live-video-lead-hint">
+              Film now — no rower needed — then merge their stroke data in later.
+              Or connect below to watch live.
+            </p>
+          )}
+        </div>
+      )}
+
       {!isAnalysis && (mode === 'setup' || setupOpen) && linkPanel}
 
       {recoverable && !isLive && (
@@ -3054,6 +3078,12 @@ function LiveCapture({ variant, active = true }) {
           screen (the untapped panel folds via its own stats line). */}
       {mode === 'review' && (
         <>
+          {/* Keep the coach's record button up top here too — after a watch
+              pauses or the rower stops, this is the review screen, and the
+              button must not be buried under the stats / panel sections. */}
+          {linkRole === 'coach' && videoRecorder.supported && (
+            <div className="live-video-lead">{videoView}</div>
+          )}
           {foldSection('stats', 'Session stats', statsView)}
           {foldSection('panel', 'Stroke & map', <>{panelTabsView}{panelsView}</>)}
           {untappedView}
@@ -3070,7 +3100,6 @@ function LiveCapture({ variant, active = true }) {
               }}
             />
           )}
-          {linkRole === 'coach' && videoView}
           <div className="live-foot">
             {timelineNav && foldSection('timeline', 'Timeline', timelineNav)}
             {timelineFooter}

@@ -2881,6 +2881,27 @@ html[data-theme='dark'] .live-map .leaflet-control-zoom a {
   font-weight: 600;
 }
 
+/* Coach setup: the record button sits up top, above the pairing panel, so a
+   coach who just wants to film finds it first. */
+.live-video-lead {
+  margin: 0 0 0.75rem;
+}
+.live-video-lead .live-video {
+  margin: 0;
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+.live-video-record {
+  width: 100%;
+}
+.live-video-lead-hint {
+  margin: 0.5rem 0 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
 /* --- Coach camera viewfinder (full-screen landscape) --- */
 .live-camera-fs {
   position: fixed;
@@ -3232,7 +3253,7 @@ html[data-theme='dark'] .live-map .leaflet-control-zoom a {
    space the play buttons out for fat fingers. */
 .va-video-wrap:fullscreen .va-video-controls,
 .va-video-wrap:-webkit-full-screen .va-video-controls {
-  bottom: calc(3.6rem + env(safe-area-inset-bottom));
+  bottom: calc(2rem + env(safe-area-inset-bottom));
   gap: 1.3rem;
   background: none;
 }
@@ -3250,7 +3271,7 @@ html[data-theme='dark'] .live-map .leaflet-control-zoom a {
 }
 .va-video-wrap:fullscreen .va-rec-controls,
 .va-video-wrap:-webkit-full-screen .va-rec-controls {
-  bottom: calc(3.6rem + env(safe-area-inset-bottom));
+  bottom: calc(2rem + env(safe-area-inset-bottom));
 }
 /* Full screen: the tool rail sits between the ✕ button and the bottom scrubber.
    The curve toggle moves off the rail here (the graph carries its own ✕ / restore
