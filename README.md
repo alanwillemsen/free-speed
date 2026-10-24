@@ -39,14 +39,47 @@ Because v³ is convex, Jensen's inequality guarantees that any speed variation i
 
 ```bash
 npm install
-npm run dev        # http://localhost:5173
+npm run dev        # https://localhost:5173 (also starts the local relay, below)
 npm run build
 ```
+
+## Coach ↔ rower link
+
+Live Capture streams a rower's phone to a coach's phone. The two phones are
+usually on different cell carriers, each behind carrier-grade NAT, so a direct
+WebRTC connection between them rarely completes. Instead each phone keeps one
+outbound WebSocket to a small Cloudflare Worker (`relay/`), which forwards
+frames between the rower's room and whoever joined it. Free tier is plenty:
+a few KB/s per session, and an idle rower costs nothing.
+
+```bash
+npm run relay:dev      # local copy on http://127.0.0.1:8787 (npm run dev does this for you)
+npm run relay:test     # protocol test against the local copy
+npm run relay:deploy   # publish to https://free-speed-relay.<your-subdomain>.workers.dev
+```
+
+First-time deploy, from a machine where you can open a browser:
+
+1. `npx wrangler login` (free Cloudflare account).
+2. `npm run relay:deploy` and copy the `https://…workers.dev` URL it prints.
+3. Put it in `.env.production` as `VITE_RELAY_URL=…`, commit, push. Vercel
+   rebuilds with it.
+
+With `VITE_RELAY_URL` empty the app falls back to WebRTC via PeerJS
+(`src/hooks/usePeerLink.js`), which still works on one Wi-Fi network. In dev,
+`.env.development` points the app at the local relay through the `/relay`
+proxy, so phones on the LAN pair the same way production does.
 
 ## Project structure
 
 ```
+relay/
+└── src/index.js                # Cloudflare Worker: one Durable Object room per peer id
 src/
+├── hooks/
+│   ├── useLink.js              # Picks the link transport (relay, or PeerJS fallback)
+│   ├── useRelayLink.js         # WebSocket relay transport
+│   └── usePeerLink.js          # WebRTC / PeerJS transport
 ├── components/
 │   ├── SpeedChart.jsx          # Interactive dual-curve chart
 │   ├── BoatVisualization.jsx   # Finish-line gap visualization

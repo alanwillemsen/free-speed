@@ -29,3 +29,6 @@ npm-install.log
 .cert
 .claude/
 scripts/water-cache.json
+
+# wrangler dev local state (relay/)
+.wrangler/

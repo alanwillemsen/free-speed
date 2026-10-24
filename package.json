@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "relay:dev": "wrangler dev -c relay/wrangler.toml --port 8787 --ip 127.0.0.1",
+    "relay:deploy": "wrangler deploy -c relay/wrangler.toml",
+    "relay:test": "node scripts/relay-protocol-test.cjs"
   },
   "dependencies": {
     "chart.js": "^4.4.1",
@@ -26,6 +29,7 @@
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
     "peer": "^1.0.2",
-    "vite": "^5.4.2"
+    "vite": "^5.4.2",
+    "wrangler": "^4.86.0"
   }
 }

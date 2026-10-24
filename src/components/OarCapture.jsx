@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import AppShell from './AppShell';
-import { usePeerLink } from '../hooks/usePeerLink';
+import { useLink } from '../hooks/useLink';
 import { useWakeLock } from '../hooks/useWakeLock';
 import {
   Chart as ChartJS,
@@ -130,7 +130,7 @@ function OarCapture() {
   };
 
   // ---------- Peer link (shared hook) ----------
-  // Connection lifecycle lives in usePeerLink; this page only owns message
+  // Connection lifecycle lives in the link hook (useLink); this page only owns message
   // semantics (hello / motion / orientation / gps) and the hello-on-open.
   const handlePeerData = (msg) => {
     const rec = recordingRef.current;
@@ -181,7 +181,7 @@ function OarCapture() {
     } catch { /* ignore */ }
   };
 
-  const link = usePeerLink({ page: 'oar', onData: handlePeerData, onOpen: handlePeerOpen });
+  const link = useLink({ page: 'oar', onData: handlePeerData, onOpen: handlePeerOpen });
 
   // ---------- Live sensor handlers ----------
   const motionHandlerRef = useRef(null);

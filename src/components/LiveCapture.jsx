@@ -15,7 +15,7 @@ import { Line, Bar } from 'react-chartjs-2';
 import LiveBigScreen from './LiveBigScreen';
 import TrackMap from './TrackMap';
 import { boatFixAt } from '../utils/geo';
-import { usePeerLink } from '../hooks/usePeerLink';
+import { useLink } from '../hooks/useLink';
 import { useWakeLock } from '../hooks/useWakeLock';
 import { useVideoRecorder } from '../hooks/useVideoRecorder';
 import AppShell from './AppShell';
@@ -600,7 +600,7 @@ function LiveCapture({ variant, active = true }) {
     } catch { /* ignore */ }
   };
 
-  const link = usePeerLink({
+  const link = useLink({
     page: 'live',
     onData: handlePeerData,
     onOpen: handlePeerOpen,
@@ -2107,7 +2107,7 @@ function LiveCapture({ variant, active = true }) {
 
   // Rower-facing status stays calm: the link runs in the background while the
   // rower is on the water, so anything short of "connected" is just "waiting" —
-  // signalling-server hiccups auto-retry (see usePeerLink) and aren't errors.
+  // relay / signalling hiccups auto-retry (see useLink) and aren't errors.
   const peerLabel = ({
     idle: 'Off',
     initializing: linkRole === 'coach' ? 'Starting…' : 'Not connected — waiting for a coach',

@@ -2,11 +2,16 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import Peer from 'peerjs';
 import QRCode from 'qrcode';
 
-// Shared WebRTC peer-link plumbing for the dual-phone capture pages (Oar Capture
-// and Live Capture). Owns the peerjs connection lifecycle only: claiming a short
-// code on the public broker, QR / join-URL pairing, and a reliable data channel.
-// Message *semantics* belong to each page — pass an `onData(msg)` handler. The
-// hook handles ping/pong round-trip timing internally.
+// WebRTC (PeerJS) transport for the dual-phone link — the FALLBACK transport.
+// Pages use useLink.js, which picks useRelayLink whenever VITE_RELAY_URL is set
+// and this hook otherwise. Across two cell carriers WebRTC needs a TURN relay,
+// and the public one PeerJS ships with no longer resolves, so phone-to-phone
+// over cell data mostly fails here; on one Wi-Fi network it still works.
+//
+// Owns the peerjs connection lifecycle only: claiming a short code on the
+// broker, QR / join-URL pairing, and a reliable data channel. Message
+// *semantics* belong to each page — pass an `onData(msg)` handler. The hook
+// handles ping/pong round-trip timing internally.
 
 const PEER_ID_PREFIX = 'freespeed-';
 const PEER_ID_RETRIES = 5;
