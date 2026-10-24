@@ -12,18 +12,16 @@ When GPS is available, the speed curve is anchored to real m/s values. Otherwise
 
 ```
 Accelerometer (60 Hz) + DeviceOrientation (gravity)
-  → Gravity compensation (subtract g from accelerationIncludingGravity)
-  → Auto-orientation calibration (3 s variance analysis)
-  → Axis selection & sign flip
-  → Noise-reduction EMA filter
-  → Stroke-boundary EMA filter → zero-crossing detector
-  → Per-stroke processing:
-      Trapezoidal integration
-        → [GPS available] Linear regression anchoring to absolute m/s
-        → [No GPS]        Drift removal → Min-max scaling to reference range
-      → Resampling to 33 uniform phase points
+  → Gravity compensation (device linear acceleration, or g subtracted from accelerationIncludingGravity)
+  → Auto-orientation calibration (6 s): principal axis = fore-aft; bow sign from the skewness
+  → Continuous axis tracking (5 s window) + bow-sign evidence (15 s skewness, persistence-gated flip)
+  → Surge acceleration = projection onto the signed axis
+  → Unified speed signal: integrate → 5 s high-pass = `rel` (the rolling-graph trace)
+      → + slow GPS-anchored level = `abs` (instantaneous m/s)
+  → Catch detection: local minimum of the 200 ms-smoothed speed (prominence hysteresis),
+      placed at the true minimum of `rel`
+  → Per-stroke: slice `abs`/`rel` catch → catch, mean speed (split), 33-pt resample (free speed)
   → Rolling average across strokes
-  → [No GPS] Mean-match scaling on save
 ```
 
 ---
@@ -52,23 +50,25 @@ When `event.acceleration` is available (good iOS, some Android), it is used dire
 
 Instead of a manual dropdown, orientation is detected automatically during a 3-second calibration window at the start of each capture.
 
-### 2.1 Axis Detection via Variance
+### 2.1 Axis Detection
 
-During calibration, gravity-compensated acceleration samples are accumulated on all three axes. After 3 seconds, the variance of each axis is computed:
+During calibration, gravity-compensated acceleration samples are accumulated on all three axes. After 6 s the fore-aft (surge) axis is taken as the principal axis of the acceleration cloud — the dominant eigenvector of the 3×3 covariance (power iteration), as a free 3D unit vector. Rowing produces by far the largest acceleration along the direction of travel, so no assumption about how the phone is mounted is needed.
 
-$$\sigma^2_{\text{axis}} = \frac{1}{N}\sum_{i=1}^{N}(a_i - \bar{a})^2$$
+If the dominant variance is below $0.5\;\text{m}^2/\text{s}^4$ there is no real motion yet and calibration restarts. After calibration the axis is re-estimated every second over a 5 s rolling window; a jump beyond 35° that persists for 2.5 s is treated as a remount and the speed signal restarts on the new axis.
 
-The axis with the highest variance between `x` and `y` is the boat-forward axis (rowing produces the largest acceleration signal along the direction of travel; `z` is vertical and ignored):
+### 2.2 Bow Sign — which way along the axis is forward
 
-$$\text{forward axis} = \arg\max(\sigma^2_x,\; \sigma^2_y)$$
+The principal axis is unsigned, so the bow direction has to be read from the *shape* of the acceleration. A hull's surge acceleration is **negatively skewed along the bow**: the catch check — the crew's momentum reversing and the blades entering — is a sharp, large deceleration spike, while the drive is a broader, lower hump (Kleshnev's boat-acceleration curves show this in every class; it measures −1.0…−1.3 in our recorded rows, and reads the right way in 99–100% of 8 s windows while rowing).
 
-If no axis exceeds a minimum variance threshold ($\sigma^2 < 0.5\;\text{m}^2/\text{s}^4$), calibration is extended until meaningful motion is detected.
+$$\text{skew} = \frac{\tfrac{1}{N}\sum (a_i - \bar a)^3}{\bigl(\tfrac{1}{N}\sum (a_i - \bar a)^2\bigr)^{3/2}}, \qquad \text{sign} : \text{skew}(a \cdot \hat d) < 0$$
 
-### 2.2 Sign Detection
+The earlier rule — "the single largest acceleration spike is the drive, hence forward" — got this backwards, because the largest spike *is* the catch. It inverted every curve: a slow rise, a sharp jump and a decline instead of the hull's sharp catch drop, drive climb and recovery decline.
 
-The sign (which direction along the axis is "toward the bow") is determined by the single largest absolute acceleration spike during calibration — this corresponds to the drive phase, which is the forward (bow-ward) direction:
+**Evidence and flipping.** After calibration the sign is tracked continuously: the surge projection is smoothed (~3 Hz; vibration is symmetric noise that only dilutes the skewness) and fed into exponentially weighted running moments with a 15 s window. If the skewness sits beyond +0.5 (i.e. the "bow" is really the stern) for 5 s without interruption, the axis is negated and the speed integrator restarted. Evidence is only accumulated while the boat is moving in the rowing band (GPS 4:00–1:00 /500 m when GPS is present; otherwise the variance gate below) — the rule's rare misses are at rest and during handling.
 
-$$\text{sign} = \text{sgn}\bigl(a_{\text{axis}}[k^*]\bigr), \qquad k^* = \arg\max_i |a_{\text{axis}}[i]|$$
+**Manual backstop.** The ⇅ button on the stroke chart and the full-screen readout flips the axis by hand and pins it for the rest of the capture. A linked coach is re-sent the direction, and adopts it with its own evidence reset.
+
+**Re-estimation never flips.** The 5 s rolling re-estimate of the axis is kept continuous with the previous direction (dot product ≥ 0); only the skewness evidence, a remount snap (which re-reads the sign on the new axis) or the user can change the sign.
 
 ### 2.3 Calibration Lifecycle
 
@@ -82,108 +82,47 @@ No stroke processing occurs during calibration. Once locked, the detected orient
 
 ---
 
-## 3. Signal Filtering
+## 3. Unified Boat-Speed Signal
 
-Two exponential moving average (EMA) filters run in parallel on every sample (after calibration completes).
+One continuous surge-speed signal drives the rolling graph, catch detection, stroke rate, split and free speed.
 
-### 3.1 Noise-Reduction Filter
+**Integration.** The surge acceleration $a(t)$ (projection onto the signed axis) is integrated sample by sample:
 
-A light EMA smooths high-frequency vibration for the recorded signal:
+$$v(t_i) = v(t_{i-1}) + a(t_i)\,\Delta t_i$$
 
-$$\hat{a}(t) = \hat{a}(t{-}1) + \alpha_n \bigl(a_{\text{raw}}(t) - \hat{a}(t{-}1)\bigr)$$
+**Drift high-pass.** Raw integration wanders (any residual bias ramps without bound), so a slow baseline is subtracted:
 
-with $\alpha_n = 0.4$.
+$$b(t_i) = b(t_{i-1}) + \bigl(1 - e^{-\Delta t_i/\tau_{hp}}\bigr)\bigl(v(t_i) - b(t_{i-1})\bigr), \qquad \text{rel}(t) = v(t) - b(t)$$
 
-This filtered value $\hat{a}(t)$ is what gets stored in the sample buffer and later integrated into velocity.
+with $\tau_{hp} = 5$ s — well above a stroke period, so the stroke-rate oscillation passes through (gain 0.99, phase ≈ 7° at 16 spm) while the runaway DC term is dropped. `rel` is relative m/s about the local mean and **is** the rolling-graph trace.
 
-### 3.2 Stroke-Boundary Detection Filter
+**GPS level.** When a recent GPS Doppler speed $g(t)$ is available (interpolated; a fix older than 3 s is ignored), a slowly varying level anchors the absolute speed:
 
-A much heavier (slower) EMA tracks the low-frequency trend for stroke segmentation:
+$$\ell(t_i) = \ell(t_{i-1}) + \bigl(1 - e^{-\Delta t_i/\tau_\ell}\bigr)\bigl(g(t_i) - \text{rel}(t_i) - \ell(t_{i-1})\bigr), \qquad \text{abs}(t) = \text{rel}(t) + \ell(t)$$
 
-$$\bar{a}(t) = \bar{a}(t{-}1) + \alpha_s \bigl(a_{\text{raw}}(t) - \bar{a}(t{-}1)\bigr)$$
-
-with $\alpha_s = 0.06$.
-
-**Full reach** (the stroke boundary) is detected when this signal crosses zero from above:
-
-$$\bar{a}(t{-}1) \geq 0 \quad \text{and} \quad \bar{a}(t) < 0$$
-
-Full reach is the moment the rower reaches maximum forward extension on the slide. Up to this point, the rower decelerating at front stops transfers momentum to the boat ("free speed"). After full reach, the boat decelerates under drag alone until the catch (blade entry), where the boat reaches its minimum speed.
-
-The crossing is accepted as a valid stroke boundary only if the elapsed time since the previous boundary falls within:
-
-$$800\;\text{ms} \;\leq\; \Delta t \;\leq\; 4000\;\text{ms}$$
-
-This corresponds to a stroke-rate range of roughly 15–75 spm, rejecting spurious crossings.
+with $\tau_\ell = 12$ s $> \tau_{hp}$, so the level only ever carries low-frequency content: the within-stroke shape comes from the IMU alone (1 Hz GPS cannot resolve it and the phone's GPS speed is itself smoothed), the magnitude from GPS.
 
 ---
 
-## 4. Per-Stroke Processing
+## 4. Catch Detection and Per-Stroke Processing
 
-Once a valid stroke is delimited (all buffered samples between two consecutive catches), the following pipeline converts raw acceleration into a speed curve.
+### 4.1 Catch detection
 
-### 4.1 Numerical Integration (Acceleration → Velocity)
+The catch is the boat's slowest point — the local **minimum** of speed where the catch deceleration turns into the drive. `rel` is smoothed with a 200 ms exponential filter and run through an alternating peak/valley tracker with 0.15 m/s prominence hysteresis: in *seekMin* the descending signal is followed to its lowest point; once it has climbed back 0.15 m/s the low was a catch, and the tracker flips to *seekMax* to find the following peak before the next descent. Strict alternation gives exactly one catch per cycle.
 
-Velocity is reconstructed from acceleration by trapezoidal integration:
+The smoother lags the speed by about its time constant, so the catch is **placed at the true minimum of `rel`** within the 600 ms behind the smoothed valley — not at the valley's own timestamp (which put the minimum at phase ≈ 0.93 of the previous stroke).
 
-$$v(t_0) = 0$$
+A catch is accepted as a stroke boundary only if the time since the previous one is within 800 ms … 4000 ms (15–75 spm).
 
-$$v(t_i) = v(t_{i-1}) + \frac{\hat{a}(t_{i-1}) + \hat{a}(t_i)}{2}\;\Delta t_i$$
+### 4.2 Per-stroke values
 
-where $\Delta t_i = t_i - t_{i-1}$ (in seconds).
+For the slice of the unified signal between consecutive catches:
 
-This yields a **relative** velocity curve — the absolute boat speed is unknown because the integration constant is arbitrary and accelerometer bias / sensor drift accumulate.
+- **Split** = mean of `abs` over the stroke (GPS-accurate in magnitude, IMU-smooth), null without a GPS anchor.
+- **Curve** = the slice resampled to 33 uniform phase points (`abs` when anchored, `rel` otherwise), with the last point forced equal to the first. Used for the free-speed number; the rolling graph draws the full-rate signal, not this.
+- **Attitude** = p5–p95 roll/pitch swing from the gravity vector.
 
-### 4.2a GPS-Anchored Mode (`processStrokeWithGPS`)
-
-When GPS speed readings are available (from `Geolocation.watchPosition` at ~1 Hz), they are used to anchor the integrated velocity to real m/s values, replacing drift removal and min-max scaling entirely.
-
-**Step 1 — Find relevant GPS readings.** All GPS speed samples within ±500 ms of the stroke window $[t_0, t_N]$ are collected.
-
-**Step 2 — Compute offsets.** For each GPS reading at time $t_g$ with speed $v_{\text{GPS}}$, the integrated velocity is interpolated at $t_g$ and the offset is:
-
-$$\delta(t_g) = v_{\text{GPS}}(t_g) - v_{\text{integrated}}(t_g)$$
-
-**Step 3 — Linear regression.** A linear correction $\delta(t) = a + bt$ is fitted to the offsets:
-
-- With 1 GPS point: constant offset ($a = \delta$, $b = 0$)
-- With 2+ GPS points: ordinary least-squares linear fit
-
-$$b = \frac{n\sum t_g \delta_g - \sum t_g \sum \delta_g}{n\sum t_g^2 - (\sum t_g)^2}, \qquad a = \frac{\sum \delta_g - b \sum t_g}{n}$$
-
-**Step 4 — Apply correction.** The anchored velocity at each sample is:
-
-$$v_{\text{anchored}}(t_i) = v_{\text{integrated}}(t_i) + a + b \cdot t_i$$
-
-This simultaneously corrects for the unknown integration constant (via $a$) and linear drift (via $b$), producing a curve in real m/s.
-
-**Fallback:** If no GPS readings fall within the stroke window, or if the anchored speeds are physically unreasonable ($\min < -1\;\text{m/s}$), the stroke falls back to relative mode.
-
-### 4.2b Relative Mode (`processStroke`)
-
-When GPS is unavailable (indoor rowing, erg, no GPS lock), the original processing pipeline is used.
-
-**Linear Drift Removal.** Integration drift manifests as a linear ramp. Because a single stroke is periodic ($v$ at the start ≈ $v$ at the end), we enforce this by subtracting a linear trend:
-
-$$d = \frac{v(t_N) - v(t_0)}{N - 1}$$
-
-$$v'(t_i) = v(t_i) - d \cdot i$$
-
-**Min-Max Scaling.** The detrended velocity is scaled to match the reference curve's amplitude:
-
-$$v_{\text{scaled}}(t_i) = v_{\text{ref,min}} + \frac{v'(t_i) - \min(\mathbf{v'})}{\max(\mathbf{v'}) - \min(\mathbf{v'})} \cdot (v_{\text{ref,max}} - v_{\text{ref,min}})$$
-
-This preserves the **shape** of the curve while discarding absolute magnitude.
-
-### 4.3 Resampling to Uniform Phase
-
-Raw samples are unevenly spaced in time. They are resampled onto a uniform grid of $N = 33$ points spanning the normalised stroke phase $\phi \in [0, 1]$ via **linear interpolation**:
-
-For each target phase point $\phi_k = \frac{k}{N-1}$, find the bracketing raw timestamps $t_j \leq t(\phi_k) < t_{j+1}$ and interpolate:
-
-$$v_k = v_{\text{src}}(t_j) + \frac{t(\phi_k) - t_j}{t_{j+1} - t_j} \bigl(v_{\text{src}}(t_{j+1}) - v_{\text{src}}(t_j)\bigr)$$
-
-The last point is then forced equal to the first ($v_{N-1} := v_0$) to guarantee a seamless periodic curve.
+Recording is gated on the rowing band: the GPS speed smoothed over max(stroke, 5 s) must lie within 2.08–8.33 m/s (4:00–1:00 /500 m).
 
 ---
 
@@ -256,13 +195,19 @@ This uniform scaling preserves the curve shape while ensuring both curves repres
 | Constant | Value | Purpose |
 |---|---|---|
 | `NUM_POINTS` | 33 | Resampling grid size |
-| `NOISE_ALPHA` | 0.4 | EMA smoothing for recorded signal |
-| `STROKE_DETECT_ALPHA` | 0.06 | EMA smoothing for catch detection |
-| `MIN_STROKE_MS` | 800 ms | Minimum stroke duration |
-| `MAX_STROKE_MS` | 4000 ms | Maximum stroke duration |
-| `MAX_STROKES` | 20 | Rolling average window |
+| `CALIBRATION_MS` | 6000 ms | Auto-orientation calibration window (> 1 stroke, so the bow sign reads) |
+| `ORIENT_WINDOW_MS` | 5000 ms | Rolling window for the axis re-estimate |
+| `ORIENT_SWITCH_DEG` | 35° | Axis jump beyond this = remount candidate |
+| `SIGN_EVIDENCE_TAU_S` | 15 s | Running-moment window for the bow-sign skewness |
+| `SIGN_MIN_SKEW` | 0.5 | Weaker skewness carries no opinion |
+| `SIGN_FLIP_HOLD_MS` | 5000 ms | Opposite evidence must persist this long before a flip |
+| `SURGE_HP_TAU_S` | 5 s | Drift high-pass on the integrated speed |
+| `GPS_LEVEL_TAU_S` | 12 s | GPS absolute-level anchor |
+| `VSMOOTH_TAU_S` | 0.2 s | Detection smoother |
+| `CATCH_PROMINENCE` | 0.15 m/s | Peak↔valley hysteresis for a real catch |
+| `CATCH_LOOKBACK_MS` | 600 ms | Search window behind the smoothed valley for the true minimum |
+| `MIN_STROKE_MS` / `MAX_STROKE_MS` | 800 / 4000 ms | Stroke-duration bounds |
 | `UI_UPDATE_MS` | 250 ms | React state sync interval |
-| `CALIBRATION_MS` | 3000 ms | Auto-orientation calibration window |
 
 ---
 

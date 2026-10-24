@@ -36,7 +36,7 @@ const THEME_KEY = 'freespeed_bigscreen_theme';
 // the app bar, above the stop control) instead of as a full-screen overlay:
 // no fullscreen/orientation requests, and the ✕ becomes a ⛶ that hands off to
 // the real full-screen instance via onEnterFullscreen.
-function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strokeRate, pieceDistance, sessionDistance, onResetPiece, live = false, getSpeedFrame, speedSeries, speedRowerTime, hasGPSAnchoring, track, onClose, embedded = false, onEnterFullscreen, defaultPanel = 'map', onRecordVideo }) {
+function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strokeRate, pieceDistance, sessionDistance, onResetPiece, live = false, getSpeedFrame, speedSeries, speedRowerTime, hasGPSAnchoring, track, onClose, embedded = false, onEnterFullscreen, defaultPanel = 'map', onRecordVideo, onFlipDirection }) {
   // Seed from the last choice, else the app theme (dark app → dark readout for
   // night rows), then let the rower flip it with the on-screen toggle — at
   // arm's length in changing light they may want the opposite of the app chrome.
@@ -259,6 +259,18 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
         >
           {panel === 'graph' ? '⌖' : '∿'}
         </button>
+        {/* Bow/stern backstop: if the trace reads upside down (slow rise, sharp
+            jump) the axis sign was misread — one tap flips it for this capture. */}
+        {onFlipDirection && panel !== 'map' && (
+          <button
+            className="bigscreen-ctrl"
+            onClick={onFlipDirection}
+            aria-label="Flip bow and stern"
+            title="Curve upside down? Flip bow/stern"
+          >
+            {'⇅'}
+          </button>
+        )}
         {onRecordVideo && (
           <button
             className="bigscreen-ctrl bigscreen-ctrl-rec"

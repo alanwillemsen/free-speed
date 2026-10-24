@@ -26,7 +26,14 @@ const GPS_STALE_MS = 3000;         // ignore a GPS fix older than this when anch
 const VSMOOTH_TAU_S = 0.20;        // ~200 ms detection smoother — kills accel noise, keeps the catch dip
 const CATCH_PROMINENCE = 0.15;     // m/s peak↔valley hysteresis for a real catch (tune on real data)
 const BUF_RETAIN_MS = 10000;       // rolling speed buffer kept for the live graph + stroke means
-export const CALIBRATION_MS = 3000; // Auto-orientation calibration window
+const CATCH_LOOKBACK_MS = 600;     // the smoothed valley lags the true speed minimum; search back this far
+export const CALIBRATION_MS = 6000; // Auto-orientation calibration window (> 1 stroke, so the bow sign reads)
+// --- Bow/stern sign evidence (see skewness / updateSignEvidence) ---
+const SIGN_SMOOTH_TAU_S = 0.05;    // ~3 Hz smoother on the surge projection before the skewness
+const SIGN_EVIDENCE_TAU_S = 15;    // running-moment window for the skewness evidence
+const SIGN_MIN_WEIGHT_S = 8;       // no sign opinion until this much motion has been seen
+const SIGN_MIN_SKEW = 0.5;         // |skew| below this is too weak to act on
+const SIGN_FLIP_HOLD_MS = 5000;    // opposite evidence must persist this long before the sign flips
 const ORIENT_WINDOW_MS = 5000;    // rolling window for the direction estimate (a stroke+)
 const ORIENT_REEVAL_MS = 1000;    // recompute the motion direction at most this often
 const ORIENT_SWITCH_MS = 2500;    // a remount must persist this long before we snap to it
@@ -89,9 +96,32 @@ export function variance(arr) {
   return arr.reduce((s, v) => s + (v - mean) ** 2, 0) / arr.length;
 }
 
+// Skewness of a sample set. This is the bow/stern tell-tale: a boat's surge
+// acceleration is NEGATIVELY skewed along the bow direction — the catch check is
+// a sharp, large deceleration spike while the drive is a broader, lower hump
+// (Kleshnev's boat-acceleration curves show it in every class; it measures
+// −1.0…−1.3 in our recorded rows). The earlier "largest spike = drive = forward"
+// rule got this backwards, inverting every curve.
+export function skewness(arr) {
+  const n = arr.length;
+  if (n < 3) return 0;
+  let m = 0;
+  for (let i = 0; i < n; i++) m += arr[i];
+  m /= n;
+  let v = 0, c = 0;
+  for (let i = 0; i < n; i++) { const d = arr[i] - m; v += d * d; c += d * d * d; }
+  v /= n; c /= n;
+  return v > 1e-12 ? c / Math.pow(v, 1.5) : 0;
+}
+
 // Identify the boat's fore-aft (surge) direction as a free 3D unit vector: the
-// principal axis of the acceleration cloud. See LiveCapture history for the full
-// rationale — power-iterated dominant eigenvector of the 3×3 covariance.
+// principal axis of the acceleration cloud — power-iterated dominant eigenvector
+// of the 3×3 covariance. The sign (which way is the bow): with `warm` (the
+// previous direction) the result is kept continuous with it, so re-estimation
+// can never flip the axis — only the skewness evidence (updateSignEvidence) or
+// the user does that. Without `warm` (first calibration, offline whole-recording
+// estimate) the sign is chosen so the projected acceleration is negatively
+// skewed (catch spike pointing sternward).
 export function principalDirection(x, y, z, warm) {
   const n = x.length;
   if (n < 2) return null;
@@ -116,12 +146,15 @@ export function principalDirection(x, y, z, warm) {
     vx = nx / mag; vy = ny / mag; vz = nz / mag;
     lambda = mag;
   }
-  let maxAbs = 0, signedMax = 1;
-  for (let i = 0; i < n; i++) {
-    const p = (x[i] - mx) * vx + (y[i] - my) * vy + (z[i] - mz) * vz;
-    if (Math.abs(p) > maxAbs) { maxAbs = Math.abs(p); signedMax = p; }
+  let flip = false;
+  if (warm) {
+    flip = vx * warm.x + vy * warm.y + vz * warm.z < 0;
+  } else {
+    const proj = new Array(n);
+    for (let i = 0; i < n; i++) proj[i] = (x[i] - mx) * vx + (y[i] - my) * vy + (z[i] - mz) * vz;
+    flip = skewness(proj) > 0;
   }
-  if (signedMax < 0) { vx = -vx; vy = -vy; vz = -vz; }
+  if (flip) { vx = -vx; vy = -vy; vz = -vz; }
   return { dir: { x: vx, y: vy, z: vz }, variance: lambda };
 }
 
@@ -302,12 +335,94 @@ export function makeProc(startTime) {
     direction: { x: 0, y: 1, z: 0 },
     calibration: { startTime, samples: { x: [], y: [], z: [] }, done: false },
     orient: { window: [], lastEval: 0, pending: null, pendingSince: 0 },
+    // Bow/stern sign evidence: running moments of the smoothed surge projection
+    // (skewness), when opposite evidence started, and whether the user has
+    // pinned the sign by hand (which disables automatic flipping).
+    sign: { p: null, m1: 0, m2: 0, m3: 0, w: 0, prevT: null, opposeSince: 0, skew: 0, locked: false },
     // Boat attitude tracking (roll/pitch from the gravity vector, when fed).
     att: { gLP: null, gSlow: null, buf: [] },
     // Set true by feedSample on a remount snap so the caller can re-send the new
     // direction to a linked coach. The caller clears it.
     remounted: false,
   };
+}
+
+// Restart the speed integrator and catch detector at `now` (after the surge axis
+// changed: a remount snap or a bow/stern flip) so the new axis doesn't inherit a
+// jump; the rolling buffer is cleared and the next sample sees dt = 0.
+function resetSpeedState(proc, now) {
+  proc.speed = { v: 0, base: 0, level: null, vSmooth: null, prevT: now, buf: [] };
+  proc.catch = { mode: 'seekMin', ext: Infinity, extT: now };
+  proc.lastBoundaryTime = now;
+  proc.remounted = true; // caller re-sends direction to a linked coach
+}
+
+// Negate the bow direction. Used by the automatic evidence flip and by the
+// user's manual flip (which also pins the sign for the rest of the capture).
+export function flipDirection(proc, now = proc.lastSampleTime, { lock = false } = {}) {
+  const d = proc.direction;
+  proc.direction = { x: -d.x, y: -d.y, z: -d.z };
+  proc.sign.m1 = -proc.sign.m1; proc.sign.m3 = -proc.sign.m3; proc.sign.skew = -proc.sign.skew;
+  proc.sign.p = proc.sign.p == null ? null : -proc.sign.p;
+  proc.sign.opposeSince = 0;
+  if (lock) proc.sign.locked = true;
+  resetSpeedState(proc, now);
+}
+
+// Adopt a direction sent by the other end of a link (the rower's calibrated or
+// re-read axis). The local sign evidence was about the old axis, so it starts
+// over — otherwise a coach whose own evidence was mid-way to flipping would
+// flip again after adopting the rower's already-flipped axis and end up
+// inverted. A hand-pinned sign (locked) keeps its side: the axis is adopted,
+// the sign stays continuous with the current one.
+export function adoptDirection(proc, dir, now = proc.lastSampleTime) {
+  if (!dir) return;
+  let next = { x: dir.x, y: dir.y, z: dir.z };
+  const cur = proc.direction;
+  let dot = next.x * cur.x + next.y * cur.y + next.z * cur.z;
+  if (proc.sign.locked && dot < 0) { next = { x: -next.x, y: -next.y, z: -next.z }; dot = -dot; }
+  // A sign flip (dot ≈ −1) or an axis jump both leave the integrator with a jump to inherit.
+  const changed = proc.calibration.done && dot < Math.cos(ORIENT_SWITCH_DEG * Math.PI / 180);
+  proc.direction = next;
+  proc.calibration.done = true;
+  proc.sign = { ...proc.sign, p: null, m1: 0, m2: 0, m3: 0, w: 0, prevT: null, opposeSince: 0, skew: 0 };
+  if (changed) resetSpeedState(proc, now);
+}
+
+// Accumulate bow/stern evidence from the signed surge projection `raw` and flip
+// the direction when the evidence says the bow is the other way. Skewness is
+// taken on a ~3 Hz-smoothed projection (vibration is symmetric noise that only
+// dilutes it) over a ~15 s running window; it must sit beyond ±SIGN_MIN_SKEW on
+// the wrong side for SIGN_FLIP_HOLD_MS before anything happens. On 4 recorded
+// rows this rule reads the right sign in 99–100% of 8 s windows while rowing;
+// its rare misses are at rest / handling, which `moving` gates out.
+function updateSignEvidence(proc, raw, now, moving) {
+  const sg = proc.sign;
+  const dt = sg.prevT == null ? 0 : (now - sg.prevT) / 1000;
+  sg.prevT = now;
+  if (sg.p == null) { sg.p = raw; return false; }
+  if (!(dt > 0 && dt <= 1)) return false;
+  sg.p += (1 - Math.exp(-dt / SIGN_SMOOTH_TAU_S)) * (raw - sg.p);
+  if (!moving) return false;
+  const k = 1 - Math.exp(-dt / SIGN_EVIDENCE_TAU_S);
+  const p = sg.p;
+  sg.m1 += k * (p - sg.m1);
+  sg.m2 += k * (p * p - sg.m2);
+  sg.m3 += k * (p * p * p - sg.m3);
+  sg.w = Math.min(sg.w + dt, SIGN_EVIDENCE_TAU_S * 4);
+  const variance = sg.m2 - sg.m1 * sg.m1;
+  if (sg.w < SIGN_MIN_WEIGHT_S || variance < ORIENT_MIN_VAR) { sg.opposeSince = 0; return false; }
+  const third = sg.m3 - 3 * sg.m1 * sg.m2 + 2 * sg.m1 ** 3;
+  sg.skew = third / Math.pow(variance, 1.5);
+  if (sg.locked) return false;
+  // Negative skew along the bow is right; a positive one says we're pointing at the stern.
+  if (sg.skew > SIGN_MIN_SKEW) {
+    if (!sg.opposeSince) sg.opposeSince = now;
+    else if (now - sg.opposeSince >= SIGN_FLIP_HOLD_MS) { flipDirection(proc, now); return true; }
+  } else {
+    sg.opposeSince = 0;
+  }
+  return false;
 }
 
 // Feed one gravity-compensated acceleration sample into the pipeline. Mutates
@@ -372,15 +487,15 @@ export function feedSample(proc, accelValues, now, gpsSpeeds, { allowWithoutGps 
       } else {
         const samePending = ori.pending && angleBetween(cand.dir, ori.pending) < ORIENT_SWITCH_DEG / 2;
         if (samePending && now - ori.pendingSince >= ORIENT_SWITCH_MS) {
-          proc.direction = cand.dir;
+          // A remount is a new axis; the bow sign on it is re-read from the
+          // skewness of the window (there is no continuity to keep).
+          proc.direction = principalDirection(
+            w.map(s => s.x), w.map(s => s.y), w.map(s => s.z)
+          )?.dir ?? cand.dir;
           ori.pending = null;
-          // Reset the unified speed signal + catch detector on a remount snap so
-          // the new fore-aft axis doesn't inherit a jump; re-seed the integrator
-          // at `now` (dt=0 on the next sample) and clear the rolling buffer.
-          proc.speed = { v: 0, base: 0, level: null, prevT: now, vSmooth: null, buf: [] };
-          proc.catch = { mode: 'seekMin', ext: Infinity, extT: now };
-          proc.lastBoundaryTime = now;
-          proc.remounted = true; // caller re-sends direction to a linked coach
+          // Old sign evidence was about the old axis — start over (keep a user lock).
+          proc.sign = { ...proc.sign, p: null, m1: 0, m2: 0, m3: 0, w: 0, prevT: null, opposeSince: 0, skew: 0 };
+          resetSpeedState(proc, now);
         } else if (!samePending) {
           ori.pending = cand.dir;
           ori.pendingSince = now;
@@ -389,12 +504,24 @@ export function feedSample(proc, accelValues, now, gpsSpeeds, { allowWithoutGps 
     }
   }
 
-  const d = proc.direction;
-  const raw = (accelValues.x ?? 0) * d.x + (accelValues.y ?? 0) * d.y + (accelValues.z ?? 0) * d.z;
+  let d = proc.direction;
+  let raw = (accelValues.x ?? 0) * d.x + (accelValues.y ?? 0) * d.y + (accelValues.z ?? 0) * d.z;
+
+  // --- Bow/stern sign: flip the axis when the acceleration skewness says the
+  // "bow" is really the stern. Gated on real boat motion (rowing-band GPS when
+  // GPS is present; otherwise the orientation tracker's variance gate). ---
+  const gpsNow = latestGpsSpeed(gpsSpeeds, now);
+  const hasGpsNow = gpsSpeeds && gpsSpeeds.length > 0;
+  const moving = hasGpsNow
+    ? (gpsNow != null && gpsNow >= MIN_ROW_SPEED && gpsNow <= MAX_ROW_SPEED)
+    : true;
+  if (updateSignEvidence(proc, raw, now, moving)) {
+    d = proc.direction;
+    raw = -raw;
+  }
 
   // --- Unified surge-speed signal (rolling graph + detection + split share this) ---
   const sp = proc.speed;
-  const gpsNow = latestGpsSpeed(gpsSpeeds, now);
   const { rel, abs, dt } = surgeStep(sp, raw, now, gpsNow);
   proc.hasGPS = sp.level != null;                     // absolute anchor achieved
   sp.buf.push({ t: now, rel, abs });
@@ -422,7 +549,18 @@ export function feedSample(proc, accelValues, now, gpsSpeeds, { allowWithoutGps 
     if (vs < cat.ext) { cat.ext = vs; cat.extT = now; }
     else if (vs - cat.ext >= CATCH_PROMINENCE) {
       isCatch = true;
-      boundaryTime = cat.extT;                 // the valley = the catch
+      // The valley of the smoothed signal is the catch — but the smoother lags
+      // the speed by ~VSMOOTH_TAU_S, so place it at the true minimum of the raw
+      // speed just behind the smoothed valley.
+      boundaryTime = cat.extT;
+      let best = null;
+      for (let i = sp.buf.length - 1; i >= 0; i--) {
+        const s = sp.buf[i];
+        if (s.t > cat.extT) continue;
+        if (s.t < cat.extT - CATCH_LOOKBACK_MS) break;
+        if (!best || s.rel < best.rel) best = s;
+      }
+      if (best) boundaryTime = best.t;
       cat.mode = 'seekMax'; cat.ext = vs; cat.extT = now;
     }
   } else {

@@ -32,7 +32,7 @@ import {
   MIN_ROW_SPEED, MAX_ROW_SPEED, SPLIT_WINDOW_MS, REF_AVG,
   windowedGpsSpeed, averageCurves, freeSpeedSecondsFor,
   makeProc, feedSample, buildReplayEvents, subtractGravity, gravityFromAngles,
-  deriveSpeedSeries, liveSpeedSeries,
+  deriveSpeedSeries, liveSpeedSeries, flipDirection, adoptDirection,
 } from '../utils/strokePipeline';
 
 ChartJS.register(LinearScale, CategoryScale, PointElement, LineElement, BarElement, Title, Tooltip, Legend, Filler);
@@ -528,10 +528,7 @@ function LiveCapture({ variant, active = true }) {
         else stopWatch();
         break;
       case 'calib':
-        if (proc && msg.dir) {
-          proc.direction = msg.dir;
-          proc.calibration.done = true;
-        }
+        if (proc && msg.dir) adoptDirection(proc, msg.dir);
         break;
       case 'motion':
         if (proc && Array.isArray(msg.samples)) {
@@ -1625,6 +1622,19 @@ function LiveCapture({ variant, active = true }) {
     window.open(url, '_blank', 'noopener');
   };
 
+  // Bow/stern backstop: the pipeline reads which way the bow is from the shape
+  // of the acceleration (the catch check is the sharp spike). If it ever gets
+  // that wrong the whole speed trace reads upside down — a slow rise and a sharp
+  // jump instead of a sharp catch drop and a drive climb. One tap flips the axis
+  // and pins it for the rest of this capture (a linked coach is re-sent the new
+  // direction via proc.remounted).
+  const handleFlipDirection = () => {
+    const proc = procRef.current;
+    if (!proc || !proc.calibration.done) return;
+    flipDirection(proc, proc.lastSampleTime || performance.now(), { lock: true });
+  };
+  const canFlip = (isCapturing || isWatching) && calibrationStatus === 'detected';
+
   // --- Chart ---
 
   // When we have a stroke snapshot (after stop/replay), derive the average from
@@ -2372,6 +2382,16 @@ function LiveCapture({ variant, active = true }) {
           </svg>
         </button>
       )}
+      {canFlip && (
+        <button
+          className="live-flip-btn"
+          onClick={handleFlipDirection}
+          aria-label="Flip bow and stern"
+          title="Curve upside down? Flip bow/stern"
+        >
+          {'⇅'}
+        </button>
+      )}
       {!avgCurve && isLive && calibrationStatus === 'calibrating' && (
         <div className="live-chart-overlay">
           <span className="live-calibrating">
@@ -2784,6 +2804,7 @@ function LiveCapture({ variant, active = true }) {
           onRecordVideo={isWatching && videoRecorder.supported
             ? () => { setBigScreen(false); armVideo(); }
             : undefined}
+          onFlipDirection={canFlip ? handleFlipDirection : undefined}
         />
       )}
       {/* Mode 1: setup — role, pairing, sensor status. In live / review mode
@@ -2968,6 +2989,7 @@ function LiveCapture({ variant, active = true }) {
               track={positions}
               onEnterFullscreen={() => setBigScreen(true)}
               onRecordVideo={videoRecorder.supported ? armVideo : undefined}
+              onFlipDirection={canFlip ? handleFlipDirection : undefined}
             />
           )}
           {videoBundle && videoView}
@@ -3003,6 +3025,7 @@ function LiveCapture({ variant, active = true }) {
               hasGPSAnchoring={hasGPSAnchoring}
               track={positions}
               onEnterFullscreen={() => setBigScreen(true)}
+              onFlipDirection={canFlip ? handleFlipDirection : undefined}
             />
           )}
           <div className="live-actions">
