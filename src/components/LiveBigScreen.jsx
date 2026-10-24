@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Line } from 'react-chartjs-2';
 import { resolveTheme } from '../hooks/useTheme';
 import { useWakeLock } from '../hooks/useWakeLock';
 import NavMap from './NavMap';
+import RollingSpeedGraph from './RollingSpeedGraph';
 
 // Outdoor full-screen readout for the rower: just the split, the stroke rate,
 // and the stroke speed profile, sized to be legible at arm's length without
@@ -36,7 +36,7 @@ const THEME_KEY = 'freespeed_bigscreen_theme';
 // the app bar, above the stop control) instead of as a full-screen overlay:
 // no fullscreen/orientation requests, and the ✕ becomes a ⛶ that hands off to
 // the real full-screen instance via onEnterFullscreen.
-function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strokeRate, pieceDistance, sessionDistance, onResetPiece, chartData, hasGPSAnchoring, track, onClose, embedded = false, onEnterFullscreen, defaultPanel = 'map', onRecordVideo }) {
+function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strokeRate, pieceDistance, sessionDistance, onResetPiece, live = false, getSpeedFrame, speedSeries, speedRowerTime, hasGPSAnchoring, track, onClose, embedded = false, onEnterFullscreen, defaultPanel = 'map', onRecordVideo }) {
   // Seed from the last choice, else the app theme (dark app → dark readout for
   // night rows), then let the rower flip it with the on-screen toggle — at
   // arm's length in changing light they may want the opposite of the app chrome.
@@ -151,80 +151,17 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
     return () => document.removeEventListener('fullscreenchange', onFs);
   }, [onClose, embedded]);
 
-  // Recolour and thicken the shared chart datasets for distance reading.
-  // The outdoor readout drops the running average — at arm's length the latest
-  // stroke (and the potential it's chasing) is what matters — and phase-shifts
-  // every curve so the cycle starts and ends at the peak speed instead of at
-  // full reach, framing the drive in the middle of the graph.
-  const bigData = useMemo(() => {
-    const datasets = (chartData.datasets || []).filter(
-      (ds) => !/average/i.test(ds.label || '')
-    );
-    // Peak of the rower's own line (latest / inspected stroke) sets the shift;
-    // fall back to the first remaining line so something still anchors it.
-    const ownDs = datasets.find((ds) => !/potential/i.test(ds.label || '')) || datasets[0];
-    let shift = 0;
-    if (ownDs?.data?.length > 1) {
-      const period = ownDs.data.length - 1; // curves are periodic: point 0 == last
-      let peakY = -Infinity;
-      for (let i = 0; i < period; i++) {
-        const y = ownDs.data[i].y;
-        if (y != null && y > peakY) { peakY = y; shift = i; }
-      }
-    }
-    // Re-index y so position 0 lands on the peak; x stays an even 0..1 sweep.
-    // The endpoint wraps back to the peak (period modulo), keeping it periodic.
-    const rotate = (data) => {
-      if (!shift || !data || data.length < 2) return data;
-      const period = data.length - 1;
-      return data.map((pt, i) => ({ x: pt.x, y: data[(shift + i) % period].y }));
-    };
-    return {
-      datasets: datasets.map((ds) => {
-        const isPotential = /potential/i.test(ds.label || '');
-        return {
-          ...ds,
-          data: rotate(ds.data),
-          borderColor: isPotential ? c.potential : c.accent,
-          backgroundColor: 'transparent',
-          borderWidth: isPotential ? 3 : 6,
-          borderDash: isPotential ? [8, 8] : [],
-          pointRadius: 0,
-          fill: false,
-          tension: 0.4,
-        };
-      }),
-    };
-  }, [chartData, c]);
-
-  const bigOptions = useMemo(() => {
-   // Phase (0..1) × the average stroke period reads out as elapsed seconds.
-   const periodMs = strokeRate > 0 ? 60000 / strokeRate : null;
-   return {
-    responsive: true,
-    maintainAspectRatio: false,
-    animation: false,
-    plugins: { legend: { display: false }, title: { display: false }, tooltip: { enabled: false } },
-    scales: {
-      x: {
-        type: 'linear', min: 0, max: 1,
-        ticks: periodMs
-          ? { color: c.muted, font: { size: 16, weight: 'bold' }, maxTicksLimit: 10,
-              callback: (val) => (val * periodMs / 1000).toFixed(2) }
-          : { display: false },
-        grid: { color: c.grid },
-        border: { color: c.grid },
-      },
-      y: {
-        ...(hasGPSAnchoring ? {} : { min: 2, max: 8 }),
-        // Units add nothing at arm's length — the curve shape is the message.
-        ticks: { display: false },
-        grid: { color: c.grid },
-        border: { color: c.grid },
-      },
-    },
-   };
-  }, [c, hasGPSAnchoring, strokeRate]);
+  // The stroke-speed panel is now the rolling EKG trace (same as Video Analysis),
+  // themed for arm's-length outdoor reading. The trace is the accent colour on a
+  // faint panel; the split / spm live in the big metric tiles, so the in-canvas
+  // readouts are hidden here (showReadouts=false via RollingSpeedGraph default).
+  const graphColors = useMemo(() => (
+    theme === 'sun'
+      ? { panel: 'rgba(0,0,0,0.04)', grid: 'rgba(0,0,0,0.10)', trace: c.accent,
+          avg: 'rgba(0,0,0,0.30)', playhead: 'rgba(0,0,0,0.30)', dot: '#c02020', text: c.fg, muted: c.muted }
+      : { panel: 'rgba(255,255,255,0.05)', grid: 'rgba(255,255,255,0.12)', trace: c.accent,
+          avg: 'rgba(255,255,255,0.35)', playhead: 'rgba(255,255,255,0.35)', dot: '#ff5a5a', text: c.fg, muted: c.muted }
+  ), [theme, c]);
 
   // Free speed as a signed seconds-per-2k string: "+1.2 s" / "−0.4 s".
   const fmtFree = (s) => (s >= 0 ? '+' : '−') + Math.abs(s).toFixed(1) + ' s';
@@ -377,7 +314,16 @@ function LiveBigScreen({ splitText, freeSpeedSeconds, avgFreeSpeedSeconds, strok
         <div className="bigscreen-graph">
           {panel === 'map'
             ? <NavMap track={track || []} trackColor={c.last} />
-            : <Line data={bigData} options={bigOptions} />}
+            : <RollingSpeedGraph
+                className="bigscreen-rolling-graph"
+                live={live}
+                getFrame={getSpeedFrame}
+                series={speedSeries}
+                rowerTime={speedRowerTime}
+                hasGPS={hasGPSAnchoring}
+                colors={graphColors}
+                windowSec={8}
+              />}
         </div>
       </div>
     </div>

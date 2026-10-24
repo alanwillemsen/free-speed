@@ -119,7 +119,6 @@ export function useVideoRecorder() {
     const track = s.getVideoTracks()[0];
     const settings = track?.getSettings?.() || {};
     const fps = settings.frameRate || 30;
-    const startCoachPerf = performance.now();
 
     // Record the phone's own gyroscope for the duration of the clip, as
     // diagnostic data in the bundle (gyro-based playback stabilization was
@@ -170,6 +169,13 @@ export function useVideoRecorder() {
         videoStore.appendChunk(e.data).catch(() => {});
       }
     };
+    // The video timeline's origin (currentTime 0) is when rec.start() fires, so
+    // stamp the sync anchor right here — NOT at the top of start(). The awaits
+    // above (devicemotion permission prompt, videoStore.begin's IndexedDB
+    // transaction) can burn anything from tens of ms to seconds, and any gap
+    // between the anchor and rec.start() is baked in as a fixed offset between
+    // the strokes and the footage — the exact "data drifts off the video" bug.
+    const startCoachPerf = performance.now();
     rec.start(CHUNK_MS);
     recorderRef.current = rec;
     setIsRecording(true);

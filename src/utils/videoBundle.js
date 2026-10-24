@@ -7,8 +7,6 @@
 // canvas overlay renderer shared by the live analyzer and the burn-in exporter.
 
 import { zipSync, unzipSync } from 'fflate';
-import { REF_SPEEDS } from './strokePipeline';
-import { catchStartIndex } from './curves';
 
 // --- ZIP container ---
 
@@ -138,23 +136,33 @@ export function findStrokeAt(strokes, rowerTime) {
 
 // --- Roll (boat heel / set) ---
 
-// A time series of the boat's lateral lean for the analyzer's tilt indicator,
-// taken from the rower phone's device-orientation stream. `gamma` is the
-// left-right tilt (degrees); `beta` would be fore-aft pitch. We recentre on the
-// median so an arbitrary phone-mount offset reads as level and the graphic shows
-// heel *relative* to the boat's own average set. Returns [] when there's no
-// orientation data (older bundles, permission denied). Same `t` domain as
-// strokes, so rowerTime from videoTimeToRowerTime indexes straight in.
-export function deriveRoll(meta) {
-  const src = meta?.orientation;
+const ROLL_LP_ALPHA = 0.3; // light low-pass on the roll angle — trims residual jitter
+
+// A time series of the boat's lateral lean (heel / set) for the analyzer's tilt
+// indicator. Model: the phone is mounted landscape and roughly level port-to-
+// starboard, so boat heel is rotation about the device x-axis — which in the W3C
+// device-orientation convention is `beta`. We use the OS sensor-fusion's beta
+// directly: it's far steadier than differencing raw acceleration, and because it's
+// rotation about x it's immune to bow-stern (fore-aft) mount pitch — that tilt
+// lives on gamma and never enters beta. (The old indicator used gamma, which for a
+// landscape mount reads the fore-aft tilt, not heel.) We lightly low-pass it and
+// recentre on the median so an arbitrary mount offset reads as level. Falls back to
+// gamma only if beta is absent. Times are the rower clock (ms) — rowerTime indexes
+// straight in.
+export function deriveRoll(recording) {
+  const src = recording?.orientation;
   if (!Array.isArray(src) || src.length === 0) return [];
+  const key = src.some((o) => o && o.beta != null) ? 'beta' : 'gamma';
+  const raw = src.filter((o) => o && o[key] != null && o.t != null).sort((a, b) => a.t - b.t);
+  if (raw.length === 0) return [];
+
   const samples = [];
-  for (const s of src) {
-    if (s == null || s.gamma == null || s.t == null) continue;
-    samples.push({ t: s.t, roll: s.gamma });
+  let r = null;
+  for (const o of raw) {
+    r = r == null ? o[key] : r + ROLL_LP_ALPHA * (o[key] - r);
+    samples.push({ t: o.t, roll: r });
   }
-  if (samples.length === 0) return [];
-  samples.sort((a, b) => a.t - b.t);
+  // Recentre on the median so it reads heel relative to the boat's own average set.
   const median = [...samples].map((p) => p.roll).sort((a, b) => a - b)[samples.length >> 1];
   for (const p of samples) p.roll -= median;
   return samples;
@@ -186,96 +194,164 @@ function formatSplit(seconds) {
   return `${m}:${s.toFixed(1).padStart(4, '0')}`;
 }
 
-const meanCube = (a) => a.reduce((s, v) => s + v * v * v, 0) / a.length;
-const REF_CATCH = catchStartIndex(REF_SPEEDS);
+// Gap (ms) between adjacent speed samples above which we treat the boat as not
+// rowing (dropped strokes / out of the pace band) and break the trace rather
+// than drawing a long straight bridge across it.
+const SERIES_GAP_MS = 700;
 
-// Draw the current stroke's speed profile, progressively "drawn" up to `phase`
-// (0..1 through the stroke window) with a leading playhead dot, plus a dashed
-// equal-power potential curve and split/spm/free-speed readouts. Drawn within
-// `rect` {x,y,w,h} over a translucent panel so it reads over video. `stroke` is
-// a stroke object (with curve[], startTime, time, gpsSpeed, spm, freeSec) or null.
-export function drawOverlay(ctx, rect, { stroke, phase, hasGPS = true } = {}) {
+// The rolling-graph series is now built by deriveSpeedSeries (strokePipeline.js) —
+// a continuous integration of fore-aft acceleration, independent of stroke
+// boundaries. This module just renders whatever {samples, lo, hi} it's handed.
+
+// Interpolated speed at rower-time `t`, or null when `t` is outside the series or
+// sits inside a no-rowing gap (so the playhead simply disappears there).
+function sampleSpeedAt(samples, t) {
+  if (!samples || samples.length < 2) return null;
+  if (t < samples[0].t || t > samples[samples.length - 1].t) return null;
+  let lo = 0, hi = samples.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (samples[mid].t < t) lo = mid + 1; else hi = mid - 1;
+  }
+  const a = samples[lo - 1], b = samples[lo];
+  if (!a || !b || b.t - a.t > SERIES_GAP_MS) return null;
+  const f = (t - a.t) / (b.t - a.t);
+  return a.v + (b.v - a.v) * f;
+}
+
+// Default rolling-graph palette (tuned for a dark card over video). Callers on a
+// light background (the outdoor big screen's "sun" theme) pass overrides.
+export const OVERLAY_COLORS = {
+  panel: 'rgba(15, 17, 26, 0.62)',
+  muted: 'rgba(255,255,255,0.6)',
+  grid: 'rgba(255,255,255,0.06)',
+  trace: '#8ea2ff',
+  avg: 'rgba(255,214,102,0.85)',
+  playhead: 'rgba(255,255,255,0.35)',
+  dot: '#ef4444',
+  text: '#fff',
+};
+
+// Draw the speed as a rolling "EKG" trace: the most recent `windowSec` seconds
+// of boat speed, scrolling right-to-left with the current instant pinned at the
+// right edge as a moving playhead. `series` comes from deriveSpeedSeries /
+// liveSpeedSeries; `rowerTime` (ms) is the playhead time; `stroke` is the stroke
+// under the playhead, used only for the split / spm / free-speed readouts.
+// `colors` overrides the palette; `showReadouts` false hides the text line (when
+// the split/spm live elsewhere on screen). Drawn within `rect` {x,y,w,h}.
+export function drawOverlay(ctx, rect, { series, rowerTime, windowSec = 4, stroke = null, hasGPS = true, colors, showReadouts = true } = {}) {
   const { x, y, w, h } = rect;
+  const col = colors ? { ...OVERLAY_COLORS, ...colors } : OVERLAY_COLORS;
   // Translucent panel.
   ctx.save();
-  ctx.fillStyle = 'rgba(15, 17, 26, 0.62)';
+  ctx.fillStyle = col.panel;
   ctx.fillRect(x, y, w, h);
 
-  if (!stroke || !stroke.curve) {
-    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  const samples = series?.samples;
+  if (!samples || samples.length < 2 || rowerTime == null) {
+    ctx.fillStyle = col.muted;
     ctx.font = `${Math.round(h * 0.09)}px system-ui, sans-serif`;
     ctx.textBaseline = 'middle';
-    ctx.fillText('— between strokes —', x + w * 0.08, y + h * 0.5);
+    ctx.fillText('— no speed data —', x + w * 0.08, y + h * 0.5);
     ctx.restore();
     return;
   }
-
-  const curve = stroke.curve;
-  const N = curve.length;
-  const strokeCatch = catchStartIndex(curve);
-  // Align the reference's catch under this stroke's catch on the unrolled
-  // (time-through-stroke) axis so both line up and the playhead sweeps L→R.
-  const refAligned = curve.map((_, i) => REF_SPEEDS[(i + REF_CATCH - strokeCatch + N) % N]);
-  const scale = meanCube(curve) > 0 ? Math.cbrt(meanCube(curve) / meanCube(REF_SPEEDS)) : 1;
-  const pot = refAligned.map((v) => v * scale);
 
   const padL = w * 0.06, padR = w * 0.04, padT = h * 0.2, padB = h * 0.1;
   const plotX = x + padL, plotY = y + padT;
   const plotW = w - padL - padR, plotH = h - padT - padB;
 
-  const ys = [...curve, ...pot];
-  let lo = Math.min(...ys), hi = Math.max(...ys);
-  const pad = Math.max((hi - lo) * 0.1, 0.2);
-  lo -= pad; hi += pad;
-  const px = (i) => plotX + (i / (N - 1)) * plotW;
-  const py = (v) => plotY + plotH - ((v - lo) / (hi - lo)) * plotH;
+  const t1 = rowerTime;                    // right edge = now
+  const t0 = rowerTime - windowSec * 1000; // left edge = windowSec ago
+  const { lo, hi } = series;
+  const span = hi - lo || 1;
+  const tx = (t) => plotX + ((t - t0) / (t1 - t0)) * plotW;
+  const vy = (v) => plotY + plotH - ((v - lo) / span) * plotH;
 
-  // Dashed potential.
-  ctx.lineWidth = Math.max(1.5, h * 0.012);
-  ctx.strokeStyle = 'rgba(75, 192, 192, 0.9)';
-  ctx.setLineDash([6, 5]);
+  ctx.save();
   ctx.beginPath();
-  pot.forEach((v, i) => (i ? ctx.lineTo(px(i), py(v)) : ctx.moveTo(px(i), py(v))));
-  ctx.stroke();
-  ctx.setLineDash([]);
+  ctx.rect(plotX, plotY, plotW, plotH);
+  ctx.clip();
 
-  // Stroke curve: faint full, bright up to the playhead.
-  ctx.strokeStyle = 'rgba(102, 126, 234, 0.3)';
-  ctx.beginPath();
-  curve.forEach((v, i) => (i ? ctx.lineTo(px(i), py(v)) : ctx.moveTo(px(i), py(v))));
-  ctx.stroke();
-
-  const head = Math.max(0, Math.min(N - 1, Math.round((phase ?? 0) * (N - 1))));
-  ctx.strokeStyle = '#8ea2ff';
-  ctx.lineWidth = Math.max(2, h * 0.018);
-  ctx.beginPath();
-  for (let i = 0; i <= head; i++) (i ? ctx.lineTo(px(i), py(curve[i])) : ctx.moveTo(px(i), py(curve[i])));
-  ctx.stroke();
-
-  // Playhead dot.
-  ctx.fillStyle = '#ef4444';
-  ctx.beginPath();
-  ctx.arc(px(head), py(curve[head]), Math.max(3, h * 0.025), 0, Math.PI * 2);
-  ctx.fill();
-
-  // Readouts.
-  ctx.fillStyle = '#fff';
-  ctx.textBaseline = 'alphabetic';
-  const split = hasGPS && stroke.gpsSpeed > 0 ? `${formatSplit(500 / stroke.gpsSpeed)}/500m` : '';
-  const spm = stroke.spm > 0 ? `${stroke.spm} spm` : '';
-  const free = hasGPS && stroke.freeSec != null ? `+${stroke.freeSec.toFixed(1)}s/2k` : '';
-  const parts = [split, spm, free].filter(Boolean).join('   ');
-  // Size to height, then shrink to fit the panel width so the readout never
-  // clips on a wide/tall overlay (e.g. full-width desktop).
-  let fs = Math.round(h * 0.1);
-  ctx.font = `600 ${fs}px system-ui, sans-serif`;
-  const maxTextW = w - padL - padR;
-  const textW = ctx.measureText(parts).width;
-  if (textW > maxTextW) {
-    fs = Math.max(10, Math.floor(fs * (maxTextW / textW)));
-    ctx.font = `600 ${fs}px system-ui, sans-serif`;
+  // Time-anchored gridlines at each whole rower-second: they slide left with the
+  // trace, selling the scrolling motion.
+  ctx.strokeStyle = col.grid;
+  ctx.lineWidth = 1;
+  for (let s = Math.ceil(t0 / 1000); s <= Math.floor(t1 / 1000); s++) {
+    const gx = tx(s * 1000);
+    ctx.beginPath(); ctx.moveTo(gx, plotY); ctx.lineTo(gx, plotY + plotH); ctx.stroke();
   }
-  ctx.fillText(parts, plotX, y + h * 0.15);
+
+  // The scrolling speed trace, broken across no-rowing gaps.
+  ctx.strokeStyle = col.trace;
+  ctx.lineWidth = Math.max(2, h * 0.02);
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  let prev = null;
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i];
+    if (s.t > t1) break;                                  // don't draw the future
+    const next = samples[i + 1];
+    if (s.t < t0 && next && next.t < t0) { prev = s; continue; } // skip old, keep the bridge-in point
+    if (!prev || s.t - prev.t > SERIES_GAP_MS) ctx.moveTo(tx(s.t), vy(s.v));
+    else ctx.lineTo(tx(s.t), vy(s.v));
+    prev = s;
+  }
+  ctx.stroke();
+
+  // Average line: the mean speed across the visible window, drawn as a dashed
+  // horizontal reference so the trace's fluctuation reads against its own average.
+  let sum = 0, n = 0;
+  for (const s of samples) {
+    if (s.t < t0) continue;
+    if (s.t > t1) break;
+    sum += s.v; n++;
+  }
+  if (n > 0) {
+    const avg = sum / n;
+    const ay = vy(avg);
+    ctx.strokeStyle = col.avg;
+    ctx.lineWidth = Math.max(1.5, h * 0.012);
+    ctx.setLineDash([Math.max(4, w * 0.02), Math.max(3, w * 0.015)]);
+    ctx.beginPath(); ctx.moveTo(plotX, ay); ctx.lineTo(plotX + plotW, ay); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  ctx.restore(); // drop the plot clip
+
+  // Playhead: a faint "now" line down the right edge and a dot at the current
+  // speed (only while there's live data under it).
+  ctx.strokeStyle = col.playhead;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(plotX + plotW, plotY); ctx.lineTo(plotX + plotW, plotY + plotH); ctx.stroke();
+  const nowV = sampleSpeedAt(samples, rowerTime);
+  if (nowV != null) {
+    ctx.fillStyle = col.dot;
+    ctx.beginPath();
+    ctx.arc(plotX + plotW, vy(nowV), Math.max(3, h * 0.025), 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Readouts (skipped when the split / spm are shown elsewhere on screen).
+  if (showReadouts) {
+    ctx.fillStyle = col.text;
+    ctx.textBaseline = 'alphabetic';
+    const split = hasGPS && stroke?.splitMps > 0 ? `${formatSplit(500 / stroke.splitMps)}/500m` : '';
+    const spm = stroke?.spm > 0 ? `${stroke.spm} spm` : '';
+    const free = hasGPS && stroke?.freeSec != null ? `+${stroke.freeSec.toFixed(1)}s/2k` : '';
+    const parts = [split, spm, free].filter(Boolean).join('   ');
+    // Size to height, then shrink to fit the panel width so the readout never
+    // clips on a wide/tall overlay (e.g. full-width desktop).
+    let fs = Math.round(h * 0.1);
+    ctx.font = `600 ${fs}px system-ui, sans-serif`;
+    const maxTextW = w - padL - padR;
+    const textW = ctx.measureText(parts).width;
+    if (textW > maxTextW && textW > 0) {
+      fs = Math.max(10, Math.floor(fs * (maxTextW / textW)));
+      ctx.font = `600 ${fs}px system-ui, sans-serif`;
+    }
+    ctx.fillText(parts, plotX, y + h * 0.15);
+  }
   ctx.restore();
 }
 
@@ -290,7 +366,7 @@ function pickRecorderMime() {
 // Re-render the source video with the synced overlay baked into the pixels,
 // returning a self-contained Blob shareable in any player. Plays the source 1×
 // into a canvas and records the canvas. Runs ~clip length; reports 0..1 progress.
-export async function exportBurnIn(videoBlob, strokes, anchor, { onProgress } = {}) {
+export async function exportBurnIn(videoBlob, series, strokes, anchor, { onProgress } = {}) {
   const url = URL.createObjectURL(videoBlob);
   try {
     const video = document.createElement('video');
@@ -323,8 +399,7 @@ export async function exportBurnIn(videoBlob, strokes, anchor, { onProgress } = 
       ctx.drawImage(video, 0, 0, w, h);
       const rowerTime = videoTimeToRowerTime(mediaTime, anchor);
       const stroke = findStrokeAt(strokes, rowerTime);
-      const phase = stroke ? (rowerTime - stroke.startTime) / (stroke.time - stroke.startTime) : 0;
-      drawOverlay(ctx, rect, { stroke, phase });
+      drawOverlay(ctx, rect, { series, rowerTime, stroke });
       onProgress?.(video.duration ? mediaTime / video.duration : 0);
     };
 

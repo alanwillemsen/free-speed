@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import {
   Chart as ChartJS,
   LinearScale,
@@ -26,13 +26,13 @@ import * as sessionLibrary from '../utils/sessionLibrary';
 import * as pairStore from '../utils/pairStore';
 import * as videoStore from '../utils/videoStore';
 import { packBundle } from '../utils/videoBundle';
-import { catchStartIndex, rollCurve } from '../utils/curves';
 import { encodeCurve } from './SavedCurves';
+import RollingSpeedGraph from './RollingSpeedGraph';
 import {
-  NUM_POINTS, MIN_ROW_SPEED, MAX_ROW_SPEED, SPLIT_WINDOW_MS,
-  REF_SPEEDS, REF_AVG, REF_ROLLED, PHASE_TIMES,
+  MIN_ROW_SPEED, MAX_ROW_SPEED, SPLIT_WINDOW_MS, REF_AVG,
   windowedGpsSpeed, averageCurves, freeSpeedSecondsFor,
   makeProc, feedSample, buildReplayEvents, subtractGravity, gravityFromAngles,
+  deriveSpeedSeries, liveSpeedSeries,
 } from '../utils/strokePipeline';
 
 ChartJS.register(LinearScale, CategoryScale, PointElement, LineElement, BarElement, Title, Tooltip, Legend, Filler);
@@ -42,6 +42,7 @@ ChartJS.register(LinearScale, CategoryScale, PointElement, LineElement, BarEleme
 const UI_UPDATE_MS = 250;
 const SEND_BATCH_MS = 100;        // Batch outgoing samples this often when coach-linked
 const PERSIST_FLUSH_MS = 2000;    // Flush new samples to IndexedDB this often (crash recovery)
+const CLOCK_SYNC_MS = 1000;       // Rower→coach wall-clock heartbeat cadence (sync diagnostics)
 const PANEL_KEY = 'freespeed_live_panel'; // last-viewed middle panel (stroke | timeline | map)
 const FOLDS_KEY = 'freespeed_review_folds'; // which review sections are folded shut
 
@@ -124,7 +125,7 @@ function LiveCapture({ variant, active = true }) {
   const [liveReplayActive, setLiveReplayActive] = useState(false);
   const [replaySpeed, setReplaySpeed] = useState(1);
   // Snapshot of all strokes after stop/replay — enables time-range selection.
-  // Each entry: { time: ms, curve: number[NUM_POINTS], avgSpeed: number }.
+  // Each entry: { startTime, time (catch→catch, ms), spm, splitMps, curve, freeSec, ... }.
   const [strokes, setStrokes] = useState([]);
   // Selection in stroke-time coordinates (same units as `time` above), or null = all.
   const [selection, setSelection] = useState(null);
@@ -219,6 +220,12 @@ function LiveCapture({ variant, active = true }) {
   // captured when recording starts. lastPingRef mirrors link.lastPing for the
   // offset's transit correction without re-subscribing handlePeerData.
   const rowerToCoachRef = useRef(null);
+  // Rower: last time we sent a wall-clock heartbeat. Coach: a rolling log of
+  // rower↔coach clock pairs { rowerT, rowerWall, coachT, coachWall, offsetPing }
+  // for post-hoc sync diagnosis — an independent, network-jitter-free offset
+  // (via each phone's own perf↔wall origin) to cross-check the ping estimate.
+  const lastClockSendRef = useRef(0);
+  const clockSyncRef = useRef([]);
   const videoAnchorRef = useRef(null);
   // The exact stroke recording being filmed. Pinned when the camera starts and
   // re-pinned if a new piece begins mid-recording, so the bundle always carries
@@ -550,6 +557,24 @@ function LiveCapture({ variant, active = true }) {
               ? offset
               : rowerToCoachRef.current + 0.2 * (offset - rowerToCoachRef.current);
           }
+        }
+        break;
+      case 'clock':
+        // Rower wall-clock heartbeat. Stamp it with our own perf↔wall pair on
+        // arrival; the offset via origins is (rowerWall−rowerT)−(coachWall−coachT),
+        // network delay cancelling. Snapshot the live ping estimate alongside so
+        // the analyzer can show the two side by side. Rolling cap keeps a long
+        // session bounded.
+        if (msg.t != null && msg.wall != null) {
+          const log = clockSyncRef.current;
+          log.push({
+            rowerT: msg.t,
+            rowerWall: msg.wall,
+            coachT: performance.now(),
+            coachWall: Date.now(),
+            offsetPing: rowerToCoachRef.current,
+          });
+          if (log.length > 300) log.shift();
         }
         break;
       case 'orientation':
@@ -892,6 +917,9 @@ function LiveCapture({ variant, active = true }) {
           orientationAngle: anchor.orientationAngle ?? 0,
           cameraZoom: anchor.cameraZoom ?? null,
           gyro: videoRecorder.takeGyro?.() || [],
+          // Wall-clock heartbeats gathered over the link — an independent,
+          // ping-free record of the rower↔coach offset for sync diagnosis.
+          clockSync: clockSyncRef.current.slice(),
         },
       };
       const bundle = { blob, meta };
@@ -1050,6 +1078,15 @@ function LiveCapture({ variant, active = true }) {
     sendIntervalRef.current = setInterval(() => {
       linkSendBatch(sendBufferRef.current);
       sendBufferRef.current = { motion: [], orientation: [], gps: [] };
+      // Piggyback a low-rate wall-clock heartbeat: our own perf↔wall pair lets
+      // the coach derive the clock offset from origins alone (no round-trip), as
+      // a cross-check on the ping-based estimate and a breadcrumb for diagnosing
+      // sync after the fact from the saved bundle.
+      const now = performance.now();
+      if (now - lastClockSendRef.current >= CLOCK_SYNC_MS) {
+        lastClockSendRef.current = now;
+        linkSendData({ type: 'clock', t: now, wall: Date.now() });
+      }
     }, SEND_BATCH_MS);
 
     // Persist raw samples to IndexedDB so a crash / reload / backgrounded-tab
@@ -1725,72 +1762,36 @@ function LiveCapture({ variant, active = true }) {
   const comparisonCurve = individualStroke ? individualStroke.curve
     : (isCapturing || isWatching) ? lastStroke
     : (medianStroke ? medianStroke.curve : displayAvgCurve);
-  // Scale the dashed potential to the stroke on screen the same way freeSpeedGain
-  // does — to equal power (mean-cube), not equal mean — so the line you see *is*
-  // the curve the free-speed number is measured against: your effort, the
-  // optimal shape, sitting above your mean by exactly the gain. Multiplicative
-  // scaling holds the reference's shape (relative variation) fixed at every pace.
-  const meanCube = (a) => a.reduce((s, v) => s + v * v * v, 0) / a.length;
-  const potentialScale = comparisonCurve && comparisonCurve.length && meanCube(comparisonCurve) > 0
-    ? Math.cbrt(meanCube(comparisonCurve) / meanCube(REF_SPEEDS))
-    : 1;
+  // --- Rolling speed graph (replaces the old periodic profile) ---
+  // The live scrolling boat-speed trace, the same one Video Analysis draws. Live:
+  // animate from the proc's rolling buffer. Review: the whole-session continuous
+  // trace with the playhead at the inspected / latest stroke.
+  const streamingLive = isCapturing || (isWatching && !isPaused);
 
-  // Roll captured curves so the chart begins where the catch deceleration kicks
-  // in (see catchStartIndex). rollStart is the catch of the stroke on screen
-  // (inspected, else the live last stroke); the reference rolls to its own catch
-  // so x=0 is the catch for both lines.
-  const rollStart = comparisonCurve && comparisonCurve.length
-    ? catchStartIndex(comparisonCurve)
-    : 0;
+  // A drawOverlay-ready frame from the live buffer, pulled every animation frame.
+  const getLiveSpeedFrame = useCallback(() => {
+    const proc = procRef.current;
+    const buf = proc?.speed?.buf;
+    if (!buf || buf.length < 2) return null;
+    return { series: liveSpeedSeries(proc), rowerTime: buf[buf.length - 1].t, hasGPS: proc.hasGPS };
+  }, []);
 
-  // Auto-scale the y-axis to whatever's plotted (scaled potential + the curves
-  // shown), padded, so each stroke fills the frame instead of a fixed scale.
-  const ys = REF_SPEEDS.map((s) => s * potentialScale);
-  if (individualStroke) ys.push(...individualStroke.curve);
-  else if (lastStroke && (isCapturing || isWatching)) ys.push(...lastStroke);
-  const yLo = Math.min(...ys), yHi = Math.max(...ys);
-  const yPad = Math.max((yHi - yLo) * 0.1, 0.2);
-  const yMin = yLo - yPad, yMax = yHi + yPad;
+  // Whole-session continuous trace for review, recomputed when the stroke
+  // snapshot changes (stop / load / replay). Heavy, so gated off during live.
+  const reviewSpeedSeries = useMemo(() => {
+    if (streamingLive) return null;
+    const rec = recordingRef.current;
+    if (!rec || !rec.motion || rec.motion.length === 0) return null;
+    return deriveSpeedSeries(rec);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streamingLive, strokes]);
 
-  const chartData = useMemo(() => {
-    const datasets = [
-      {
-        label: 'Your potential',
-        data: REF_ROLLED.map((s, i) => ({ x: PHASE_TIMES[i], y: s * potentialScale })),
-        borderColor: 'rgba(75, 192, 192, 1)',
-        borderWidth: 3,
-        borderDash: [5, 5],
-        pointRadius: 0,
-        tension: 0.4,
-        fill: false,
-      },
-    ];
-
-    if (individualStroke) {
-      datasets.push({
-        label: `Stroke #${selectedIndex + 1} of ${strokes.length}`,
-        data: rollCurve(individualStroke.curve, rollStart).map((s, i) => ({ x: PHASE_TIMES[i], y: s })),
-        borderColor: '#ef4444',
-        backgroundColor: 'rgba(239, 68, 68, 0.1)',
-        borderWidth: 3,
-        pointRadius: 0,
-        tension: 0.4,
-        fill: true,
-      });
-    } else if (lastStroke && (isCapturing || isWatching)) {
-      datasets.push({
-        label: 'Last Stroke',
-        data: rollCurve(lastStroke, rollStart).map((s, i) => ({ x: PHASE_TIMES[i], y: s })),
-        borderColor: 'rgba(255, 99, 132, 0.4)',
-        borderWidth: 1.5,
-        pointRadius: 0,
-        tension: 0.4,
-        fill: false,
-      });
-    }
-
-    return { datasets };
-  }, [lastStroke, individualStroke, selectedIndex, strokes.length, potentialScale, rollStart, isCapturing, isWatching]);
+  // Review playhead: the inspected stroke, else the end of the reviewed range.
+  const reviewRowerTime = useMemo(() => {
+    if (individualStroke) return individualStroke.time;
+    if (selectedStrokes && selectedStrokes.length) return selectedStrokes[selectedStrokes.length - 1].time;
+    return strokes.length ? strokes[strokes.length - 1].time : null;
+  }, [individualStroke, selectedStrokes, strokes]);
 
   // --- Stroke-time chart (one point per stroke, drag-to-select range) ---
 
@@ -1802,11 +1803,11 @@ function LiveCapture({ variant, active = true }) {
     const s = seconds - m * 60;
     return `${m}:${s.toFixed(1).padStart(4, '0')}`;
   };
-  // Per-stroke y value: GPS-derived split (s/500m) when anchored, else the
+  // Per-stroke y value: fused-speed split (s/500m) when anchored, else the
   // relative curve mean. Null when anchored but this stroke lacked GPS (gaps).
   const strokeY = (s) => {
-    if (hasGPSAnchoring) return s.gpsSpeed > 0 ? 500 / s.gpsSpeed : null;
-    return s.avgSpeed;
+    if (hasGPSAnchoring) return s.splitMps > 0 ? 500 / s.splitMps : null;
+    return s.curve && s.curve.length ? s.curve.reduce((a, b) => a + b, 0) / s.curve.length : null;
   };
 
   const t0 = strokes.length > 0 ? strokes[0].time : 0;
@@ -1987,71 +1988,6 @@ function LiveCapture({ variant, active = true }) {
       }
     }
   };
-
-  const chartOptions = useMemo(() => {
-   // Curves are stored phase-normalized (0..1) since strokes vary in length; the
-   // stroke rate gives the average period, so phase × period reads out as ms.
-   const periodMs = displayStrokeRate > 0 ? 60000 / displayStrokeRate : null;
-   return {
-    responsive: true,
-    maintainAspectRatio: false,
-    animation: false,
-    plugins: {
-      legend: {
-        position: 'top',
-        labels: {
-          usePointStyle: true,
-          pointStyle: 'line',
-          color: chrome.title,
-          font: { size: 11 },
-          generateLabels: (chart) => {
-            const labels = ChartJS.defaults.plugins.legend.labels.generateLabels(chart);
-            labels.forEach(label => {
-              if (label.text.includes('potential')) label.lineDash = [5, 5];
-            });
-            return labels;
-          },
-        },
-      },
-      title: {
-        display: true,
-        text: 'Stroke Speed Profile',
-        color: chrome.title,
-        font: { size: 16, weight: 'bold' },
-      },
-      tooltip: { enabled: false },
-    },
-    scales: {
-      x: {
-        type: 'linear',
-        min: 0,
-        max: 1,
-        grid: { color: chrome.grid },
-        title: { display: true, text: periodMs ? 'Time (s)' : 'Stroke Phase', color: chrome.title, font: { size: 12 } },
-        ticks: {
-          callback: periodMs
-            ? (val) => (val * periodMs / 1000).toFixed(2)
-            : (val) => Math.round(val * 100) + '%',
-          color: chrome.tick,
-          maxTicksLimit: 6,
-        },
-      },
-      y: {
-        // Auto-scaled per stroke (see yMin/yMax) so the curve fills the frame.
-        min: yMin,
-        max: yMax,
-        grid: { color: chrome.grid },
-        ticks: { color: chrome.tick },
-        title: {
-          display: true,
-          text: hasGPSAnchoring ? 'Boat Speed (m/s)' : 'Boat Speed (relative)',
-          color: chrome.title,
-          font: { size: 12 },
-        },
-      },
-    },
-   };
-  }, [hasGPSAnchoring, displayStrokeRate, yMin, yMax, chrome]);
 
   // --- Render ---
 
@@ -2301,7 +2237,7 @@ function LiveCapture({ variant, active = true }) {
   // Boat speed as a 500m split, from GPS speed (accurate) rather than the IMU
   // curve. Inspecting a stroke → that stroke; reviewing a range → its mean;
   // live → the latest stroke. Only meaningful when GPS-anchored.
-  const splitFromStroke = (s) => (s && s.gpsSpeed > 0 ? s.gpsSpeed : null);
+  const splitFromStroke = (s) => (s && s.splitMps > 0 ? s.splitMps : null);
   let displaySplitSpeed = null;
   if (individualStroke) {
     displaySplitSpeed = splitFromStroke(individualStroke);
@@ -2403,7 +2339,15 @@ function LiveCapture({ variant, active = true }) {
   const chartView = (
     <div className="live-chart-container">
       <div className="live-chart-wrapper">
-        <Line data={chartData} options={chartOptions} />
+        <RollingSpeedGraph
+          className="live-rolling-graph"
+          live={streamingLive}
+          getFrame={getLiveSpeedFrame}
+          series={reviewSpeedSeries}
+          rowerTime={reviewRowerTime}
+          hasGPS={hasGPSAnchoring}
+          windowSec={6}
+        />
       </div>
       {avgCurve && (
         <button
@@ -2830,7 +2774,10 @@ function LiveCapture({ variant, active = true }) {
           pieceDistance={pieceDistance}
           sessionDistance={sessionDistance}
           onResetPiece={resetPiece}
-          chartData={chartData}
+          live={streamingLive}
+          getSpeedFrame={getLiveSpeedFrame}
+          speedSeries={reviewSpeedSeries}
+          speedRowerTime={reviewRowerTime}
           hasGPSAnchoring={hasGPSAnchoring}
           track={positions}
           onClose={() => setBigScreen(false)}
@@ -3013,7 +2960,10 @@ function LiveCapture({ variant, active = true }) {
               pieceDistance={pieceDistance}
               sessionDistance={sessionDistance}
               onResetPiece={resetPiece}
-              chartData={chartData}
+              live={streamingLive}
+              getSpeedFrame={getLiveSpeedFrame}
+              speedSeries={reviewSpeedSeries}
+              speedRowerTime={reviewRowerTime}
               hasGPSAnchoring={hasGPSAnchoring}
               track={positions}
               onEnterFullscreen={() => setBigScreen(true)}
@@ -3046,7 +2996,10 @@ function LiveCapture({ variant, active = true }) {
               pieceDistance={pieceDistance}
               sessionDistance={sessionDistance}
               onResetPiece={resetPiece}
-              chartData={chartData}
+              live={streamingLive}
+              getSpeedFrame={getLiveSpeedFrame}
+              speedSeries={reviewSpeedSeries}
+              speedRowerTime={reviewRowerTime}
               hasGPSAnchoring={hasGPSAnchoring}
               track={positions}
               onEnterFullscreen={() => setBigScreen(true)}

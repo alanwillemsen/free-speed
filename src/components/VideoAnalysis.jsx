@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { deriveStrokes } from '../utils/strokePipeline';
+import { deriveStrokes, deriveSpeedSeries } from '../utils/strokePipeline';
 import {
   unpackBundle, packBundle, drawOverlay, videoTimeToRowerTime, findStrokeAt, exportBurnIn,
   deriveRoll, rollAt,
@@ -11,6 +11,13 @@ import AppShell from './AppShell';
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const RATES = [0.25, 0.5, 1, 2, 4];
+
+// Interactive overlays that live inside the video-wrap. A press on any of these
+// must not start a pan/pinch — capturing the pointer here would re-target their
+// click to the wrap and swallow it (e.g. tapping a rail tool while zoomed).
+const CONTROL_SELECTOR = '.va-video-controls, .va-fs-transport, .va-menu, .va-fs-btn, '
+  + '.va-rail, .va-rec-controls, .va-fs-curve, .va-fs-roll, .va-fs-roll-chip, '
+  + '.va-fs-curve-chip, .va-color-pop, .va-color-scrim, .va-clip-ready';
 
 // Common camera frame rates. A noisy rVFC estimate that sits within 5% of one
 // of these snaps to it exactly, so frame steps land dead on frame boundaries.
@@ -25,7 +32,8 @@ const snapFps = (f) => {
 // Roll (heel / set) indicator: a line standing in for the boat/rigger that tilts
 // with lateral lean, its end bulbs the blade tips (green = starboard, red =
 // port). From the rower's seat starboard is to their left and port to their
-// right, so green sits on the LEFT.
+// right, so green sits on the LEFT. Filming from behind the boat mirrors that
+// view, so `flip` swaps the sides (and the tilt direction with them) to match.
 //
 // Drawn to physical scale against a water-surface line below: with the blade
 // ~2.4 m outboard, the tip height = OAR_REACH · sin(roll). At level the blades
@@ -33,8 +41,10 @@ const snapFps = (f) => {
 // the water line once its tip has dropped that far — i.e. at a real ~1.2° heel.
 const OAR_REACH_M = 2.4;        // blade tip distance from the boat centreline
 const BLADE_CLEARANCE_CM = 5;   // blade height above the water when level
-const ROLL_DISPLAY_CM = 9;      // vertical half-range drawn before the blade pegs
-function drawRollIndicator(ctx, w, h, roll) {
+const ROLL_DISPLAY_CM = 20;     // vertical half-range drawn before the blade pegs
+                                // (~4.8° heel — real set is ±1.5–3.6°, so it reads
+                                // proportionally instead of slamming to full scale)
+function drawRollIndicator(ctx, w, h, roll, flip = false) {
   const cx = w / 2;
   const len = Math.min(w * 0.58, 96);
   const r = clamp(Math.min(w, h) * 0.13, 6, 11);
@@ -58,7 +68,8 @@ function drawRollIndicator(ctx, w, h, roll) {
   // (rower's left) → the green (left) blade drops toward the water.
   const dropCm = has ? OAR_REACH_M * Math.sin(roll * Math.PI / 180) * 100 : 0;
   const dy = clamp(dropCm, -ROLL_DISPLAY_CM, ROLL_DISPLAY_CM) * pxPerCm;
-  const dx = len / 2;
+  const s = flip ? -1 : 1;   // mirror the whole picture when filming from behind
+  const dx = (len / 2) * s;
   const left = { x: cx - dx, y: pivotY + dy };   // starboard · green
   const right = { x: cx + dx, y: pivotY - dy };  // port · red
 
@@ -100,6 +111,18 @@ const RollIcon = () => (
   </svg>
 );
 
+// Left/right mirror arrows around a divider — flips the roll indicator's sides.
+const FlipIcon = () => (
+  <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor"
+    strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <line x1="10" y1="3" x2="10" y2="17" strokeDasharray="2 2" />
+    <path d="M6 7 L3 10 L6 13" />
+    <path d="M14 7 L17 10 L14 13" />
+    <line x1="3" y1="10" x2="7" y2="10" />
+    <line x1="13" y1="10" x2="17" y2="10" />
+  </svg>
+);
+
 // Minimize: a low bar (underscore), for collapsing a widget to its chip —
 // distinct from the fullscreen-exit ✕ it would otherwise sit beside.
 const MinimizeIcon = () => (
@@ -130,6 +153,25 @@ const MicIcon = ({ muted }) => (
   </svg>
 );
 
+// Sync diagnostics from the bundle's wall-clock heartbeats (meta.video.clockSync).
+// Each heartbeat carries both phones' perf↔wall origins, so the rower↔coach
+// offset falls out of the origins alone — no network round-trip — as an
+// independent check on the ping-based rowerToCoachOffset baked into the anchor.
+// offsetWall = (rowerWall − rowerT) − (coachWall − coachT). Returns null with no
+// heartbeats (older bundles, or a clip filmed with no rower linked).
+function computeSyncDiag(videoMeta) {
+  const log = videoMeta?.clockSync;
+  if (!Array.isArray(log) || log.length === 0) return null;
+  const offs = log
+    .filter((c) => c.rowerT != null && c.rowerWall != null && c.coachT != null && c.coachWall != null)
+    .map((c) => (c.rowerWall - c.rowerT) - (c.coachWall - c.coachT))
+    .sort((a, b) => a - b);
+  if (offs.length === 0) return null;
+  const wall = offs[offs.length >> 1]; // median — robust to a stray heartbeat
+  const ping = videoMeta?.rowerToCoachOffset ?? 0;
+  return { ping, wall, delta: ping - wall, n: offs.length };
+}
+
 // The video analyzer: play a coach's recording with the stroke speed-profile
 // drawn in sync — variable speed, scrubbable, frame-by-frame — on phone or
 // computer. Loads a bundle either handed off in-memory from Live Capture or
@@ -143,6 +185,9 @@ function VideoAnalysis() {
   const [hasRoll, setHasRoll] = useState(false); // boat-roll indicator has data
   const [showRoll, setShowRoll] = useState(false); // roll widget shown vs collapsed to a chip (starts collapsed)
   const [rollPos, setRollPos] = useState(null);   // {x,y} once dragged; null = CSS default (top-right)
+  // Mirror the roll indicator for footage shot from behind the boat (starboard
+  // then reads on the right). A per-device setup preference, so it's persisted.
+  const [rollFlip, setRollFlip] = useState(() => localStorage.getItem('va-roll-flip') === '1');
 
   // Transport UI
   const [playing, setPlaying] = useState(false);
@@ -151,6 +196,7 @@ function VideoAnalysis() {
   const [duration, setDuration] = useState(0);
   const [nudgeMs, setNudgeMs] = useState(0); // manual sync correction
   const [strokeCount, setStrokeCount] = useState(0);
+  const [syncDiag, setSyncDiag] = useState(null); // {ping, wall, delta, n} from the bundle's clock heartbeats
   const [exporting, setExporting] = useState(0); // 0 = idle, else 0..1 progress
   const [readyClip, setReadyClip] = useState(null); // burned File awaiting share/download
   const [isFs, setIsFs] = useState(false);
@@ -180,6 +226,8 @@ function VideoAnalysis() {
   const zoomRef = useRef({ scale: 1, x: 0, y: 0 });
   const pointersRef = useRef(new Map());
   const pinchRef = useRef(null);
+  const panRef = useRef(null);        // in-flight single-pointer (mouse) pan
+  const pannedRef = useRef(false);    // a pan actually moved — swallow the trailing click
 
   // Seek serialization: setting video.currentTime starts an async seek, and on
   // mobile the H.264/HEVC decoder stalls if a new seek lands before the last
@@ -213,6 +261,7 @@ function VideoAnalysis() {
 
   // Stable data for the (stable) draw loop.
   const strokesRef = useRef([]);
+  const speedSeriesRef = useRef(null); // continuous speed series for the rolling graph
   const rollRef = useRef([]);           // boat-roll time series
   const rollCanvasRef = useRef(null);   // fullscreen roll indicator canvas
   const rollDragRef = useRef(null);     // in-flight drag of the roll widget
@@ -237,9 +286,10 @@ function VideoAnalysis() {
       const { meta, videoBlob } = await unpackBundle(zipBlob);
       const strokes = deriveStrokes(meta);
       strokesRef.current = strokes;
+      speedSeriesRef.current = deriveSpeedSeries(meta);
       rollRef.current = deriveRoll(meta);
       setHasRoll(rollRef.current.length > 0);
-      hasGPSRef.current = strokes.some((s) => s.gpsSpeed > 0);
+      hasGPSRef.current = strokes.some((s) => s.splitMps != null);
       anchorRef.current = {
         startCoachPerf: meta.video?.startCoachPerf ?? 0,
         rowerToCoachOffset: meta.video?.rowerToCoachOffset ?? 0,
@@ -253,6 +303,7 @@ function VideoAnalysis() {
       setNudgeMs(0);
       nudgeRef.current = 0;
       videoMetaRef.current = meta.video || null;
+      setSyncDiag(computeSyncDiag(meta.video));
       setHasData(true);
       if (persist) videoStore.putCurrent(zipBlob).catch(() => {});
     } catch (e) {
@@ -319,7 +370,7 @@ function VideoAnalysis() {
   // --- Drawing ---
   // Paint the speed overlay into one canvas (the side panel, and/or the floating
   // fullscreen curve), sizing its backing store to its layout box.
-  const paintOverlay = useCallback((canvas, stroke, phase) => {
+  const paintOverlay = useCallback((canvas, rowerTime, stroke) => {
     if (!canvas) return;
     const w = canvas.clientWidth, h = canvas.clientHeight;
     if (w === 0 || h === 0) return;
@@ -327,7 +378,9 @@ function VideoAnalysis() {
     if (canvas.height !== h) canvas.height = h;
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, w, h);
-    drawOverlay(ctx, { x: 0, y: 0, w, h }, { stroke, phase, hasGPS: hasGPSRef.current });
+    drawOverlay(ctx, { x: 0, y: 0, w, h }, {
+      series: speedSeriesRef.current, rowerTime, stroke, hasGPS: hasGPSRef.current,
+    });
   }, []);
 
   // Paint the fullscreen roll indicator, sizing its backing store to its box.
@@ -340,16 +393,13 @@ function VideoAnalysis() {
     if (canvas.height !== h) canvas.height = h;
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, w, h);
-    drawRollIndicator(ctx, w, h, rollAt(rollRef.current, rowerTime));
-  }, []);
+    drawRollIndicator(ctx, w, h, rollAt(rollRef.current, rowerTime), rollFlip);
+  }, [rollFlip]);
 
   const draw = useCallback((t) => {
     const rowerTime = videoTimeToRowerTime(t, anchorRef.current) + nudgeRef.current;
-    const stroke = findStrokeAt(strokesRef.current, rowerTime);
-    const phase = stroke
-      ? clamp((rowerTime - stroke.startTime) / (stroke.time - stroke.startTime), 0, 1)
-      : 0;
-    paintOverlay(fsOverlayRef.current, stroke, phase); // floating speed curve
+    const stroke = findStrokeAt(strokesRef.current, rowerTime); // for the readouts
+    paintOverlay(fsOverlayRef.current, rowerTime, stroke); // rolling speed graph
     paintRoll(rowerTime); // roll indicator
   }, [paintOverlay, paintRoll]);
 
@@ -565,10 +615,9 @@ function VideoAnalysis() {
     if (showCurveRef.current) {
       const rowerTime = videoTimeToRowerTime(v ? v.currentTime : 0, anchorRef.current) + nudgeRef.current;
       const stroke = findStrokeAt(strokesRef.current, rowerTime);
-      const phase = stroke
-        ? clamp((rowerTime - stroke.startTime) / (stroke.time - stroke.startTime), 0, 1)
-        : 0;
-      drawOverlay(ctx, CURVE_RECT(w, h), { stroke, phase, hasGPS: hasGPSRef.current });
+      drawOverlay(ctx, CURVE_RECT(w, h), {
+        series: speedSeriesRef.current, rowerTime, stroke, hasGPS: hasGPSRef.current,
+      });
     }
     drawAnnotations(ctx, annStrokesRef.current, currentStrokeRef.current, { x: 0, y: 0, w, h });
   }, []);
@@ -683,7 +732,7 @@ function VideoAnalysis() {
   };
 
   const onVideoPointerDown = (e) => {
-    if (!isFs || e.target.closest?.('.va-video-controls, .va-fs-transport, .va-menu, .va-fs-btn')) return;
+    if (!isFs || e.target.closest?.(CONTROL_SELECTOR)) return;
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pointersRef.current.size === 2) {
       const r = videoWrapRef.current.getBoundingClientRect();
@@ -694,6 +743,13 @@ function VideoAnalysis() {
         my: (a.y + b.y) / 2 - r.top,
         start: { ...zoomRef.current },
       };
+    } else if (e.pointerType === 'mouse' && zoomRef.current.scale > 1 && !annotateMode) {
+      // A mouse can't two-finger drag, so once zoomed in a single-button drag
+      // pans the footage — the mouse equivalent of the phone's two-finger pan.
+      // Skipped in annotate mode so a drag draws instead of stealing the pointer.
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      panRef.current = { id: e.pointerId, x: e.clientX, y: e.clientY, start: { ...zoomRef.current } };
+      pannedRef.current = false;
     }
   };
 
@@ -710,12 +766,25 @@ function VideoAnalysis() {
       let z = focalZoom(start.scale * (dist / d0), mx0, my0, start);
       if (z.scale > 1) z = { scale: z.scale, x: z.x + (mx - mx0), y: z.y + (my - my0) };
       setZoomState(z);
+    } else if (panRef.current?.id === e.pointerId) {
+      const d = panRef.current;
+      const nx = e.clientX - d.x, ny = e.clientY - d.y;
+      if (Math.abs(nx) > 3 || Math.abs(ny) > 3) pannedRef.current = true;
+      setZoomState({ scale: d.start.scale, x: d.start.x + nx, y: d.start.y + ny });
     }
   };
 
   const onVideoPointerUp = (e) => {
     pointersRef.current.delete(e.pointerId);
     if (pointersRef.current.size < 2) pinchRef.current = null;
+    if (panRef.current?.id === e.pointerId) panRef.current = null;
+  };
+
+  // Tap the footage to play/pause — but if the mouse just dragged to pan, that
+  // trailing click is part of the drag, not a play toggle, so swallow it once.
+  const onVideoClick = () => {
+    if (pannedRef.current) { pannedRef.current = false; return; }
+    togglePlay();
   };
 
   const onVideoWheel = (e) => {
@@ -781,9 +850,10 @@ function VideoAnalysis() {
         return;
       }
       strokesRef.current = strokes;
+      speedSeriesRef.current = deriveSpeedSeries(rec);
       rollRef.current = deriveRoll(rec);
       setHasRoll(rollRef.current.length > 0);
-      hasGPSRef.current = strokes.some((s) => s.gpsSpeed > 0);
+      hasGPSRef.current = strokes.some((s) => s.splitMps != null);
       setStrokeCount(strokes.length);
       // No shared clock: pin video t=0 to the first stroke's catch as a starting
       // point (the coach refines with "Align here" + the ± nudge).
@@ -856,7 +926,7 @@ function VideoAnalysis() {
         rowerToCoachOffset: a.rowerToCoachOffset - nudgeRef.current,
         fps: a.fps,
       };
-      const burned = await exportBurnIn(videoBlobRef.current, strokesRef.current, anchor, {
+      const burned = await exportBurnIn(videoBlobRef.current, speedSeriesRef.current, strokesRef.current, anchor, {
         onProgress: (p) => setExporting(Math.max(0.0001, p)),
       });
       const ext = (burned.type || '').includes('mp4') ? 'mp4' : 'webm';
@@ -966,7 +1036,7 @@ function VideoAnalysis() {
                 muted
                 disablePictureInPicture
                 controlsList="nodownload nofullscreen noremoteplayback noplaybackrate"
-                style={{ transform: footageTransform, transformOrigin: '0 0' }}
+                style={{ transform: footageTransform, transformOrigin: '0 0', cursor: isFs && zoom.scale > 1 ? 'grab' : undefined }}
                 onLoadedMetadata={(e) => {
                   const dur = e.target.duration || 0;
                   setDuration(dur);
@@ -978,7 +1048,7 @@ function VideoAnalysis() {
                   if (strokesRef.current.length && !isAligned(dur)) autoAlignStart();
                   draw(0);
                 }}
-                onClick={togglePlay}
+                onClick={onVideoClick}
                 onEnded={() => setPlaying(false)}
               />
 
@@ -1123,6 +1193,19 @@ function VideoAnalysis() {
                   onPointerCancel={onRollDragEnd}
                 >
                   <canvas ref={rollCanvasRef} className="va-fs-roll-canvas" aria-hidden="true" />
+                  <button
+                    className={'va-fs-roll-flip' + (rollFlip ? ' is-on' : '')}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={() => setRollFlip((f) => {
+                      const next = !f;
+                      localStorage.setItem('va-roll-flip', next ? '1' : '0');
+                      return next;
+                    })}
+                    title={rollFlip
+                      ? 'Roll mirrored for filming from behind — tap to reset'
+                      : 'Flip roll sides (filming from behind the boat)'}
+                    aria-label="Flip roll indicator sides" aria-pressed={rollFlip}
+                  ><FlipIcon /></button>
                   <button
                     className="va-fs-roll-close"
                     onPointerDown={(e) => e.stopPropagation()}
@@ -1317,6 +1400,21 @@ function VideoAnalysis() {
                 ? '⚠ No stroke data in this clip — tap “Add stroke data” to merge the rower’s recorded session, or it may be missing / all out of the rowing-speed band.'
                 : `${strokeCount} strokes${isAligned() ? '' : ' · curve not lined up — tap “Align here” over a drive, then fine-tune'}`}
             </div>
+
+            {/* Clock-sync self-check: the ping-based offset used for sync vs. the
+                independent wall-clock estimate from the recorded heartbeats. A
+                small Δ means the clock bridge is trustworthy and any remaining
+                drift is the video anchor, not the offset; a large Δ points the
+                finger back at cross-phone clock sync. */}
+            {syncDiag && (
+              <div className={`va-diag va-syncdiag${Math.abs(syncDiag.delta) <= 50 ? '' : ' va-syncdiag-warn'}`}>
+                Clock check: ping vs wall-clock offset Δ {syncDiag.delta >= 0 ? '+' : ''}{Math.round(syncDiag.delta)} ms{' '}
+                {Math.abs(syncDiag.delta) <= 50
+                  ? '— clocks agree, sync bridge is sound ✓'
+                  : '— clocks disagree; sync may be off by about this much ⚠'}
+                {' '}· {syncDiag.n} heartbeat{syncDiag.n === 1 ? '' : 's'}
+              </div>
+            )}
 
             <input
               ref={fileInputRef}

@@ -1499,6 +1499,15 @@ body {
   min-height: 280px;
 }
 
+/* Rolling speed-graph canvases (RollingSpeedGraph) fill their slot; the trace is
+   painted at the box's device size in JS, so the element just needs to stretch. */
+.live-rolling-graph {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 280px;
+}
+
 .live-chart-overlay {
   position: absolute;
   inset: 0;
@@ -1749,6 +1758,12 @@ body {
   min-width: 0;
   min-height: 0;
   box-sizing: border-box;
+}
+
+.bigscreen-rolling-graph {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 /* Course-down navigation map (NavMap) in the graph slot. Leaflet can't rotate,
@@ -3523,6 +3538,27 @@ html[data-theme='dark'] .live-map .leaflet-control-zoom a {
   -webkit-tap-highlight-color: transparent;
 }
 .va-fs-roll-close:active { background: rgba(60, 64, 84, 0.85); }
+/* Flip sides: sits in the widget's top-left, mirroring the minimize button. */
+.va-fs-roll-flip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: none;
+  border-radius: 10px 0 8px 0;
+  background: rgba(20, 22, 32, 0.5);
+  color: var(--on-accent);
+  line-height: 1;
+  cursor: pointer;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.va-fs-roll-flip:active { background: rgba(60, 64, 84, 0.85); }
+.va-fs-roll-flip.is-on { background: rgba(56, 132, 255, 0.7); }
 /* Collapsed roll indicator: chip at the widget's home spot (top-right, left of
    the ✕ button). */
 .va-fs-roll-chip {
@@ -3699,6 +3735,13 @@ html[data-theme='dark'] .live-map .leaflet-control-zoom a {
   font-size: 0.78rem;
   color: var(--text-faint);
   line-height: 1.35;
+}
+.va-syncdiag {
+  margin-top: 0.25rem;
+  font-variant-numeric: tabular-nums;
+}
+.va-syncdiag-warn {
+  color: var(--warn, #d97706);
 }
 /* ── Global app shell: slim top bar + slide-out nav drawer ────────────────── */
 .app-shell {
